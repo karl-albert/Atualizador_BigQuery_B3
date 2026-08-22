@@ -293,10 +293,11 @@ def extrair_fechamento_dolar() -> pd.DataFrame:
 # ==============================================================================
 # 4. CARGA INCREMENTAL (SANDBOX FREE TIER COMPATIBLE - SEM QUERIES DML MERGE)
 # ==============================================================================
-def upsert_tabela_sandbox(client: bigquery.Client, df_novos: pd.DataFrame, nome_tabela: str, chaves: list, schema: list = None):
+def upsert_tabela_sandbox(client: bigquery.Client, df_novos: pd.DataFrame, nome_tabela: str, chaves: list):
     """
     Realiza carga/upsert incremental 100% compatível com BigQuery Free Tier (Sandbox).
     Substitui queries DML (MERGE/UPDATE) por Load Jobs com desduplicação em memória.
+    Preserva a especificação de partição nativa da tabela destino no BigQuery.
     """
     if df_novos is None or df_novos.empty:
         logger.info(f"Nenhum dado novo para a tabela '{nome_tabela}'.")
@@ -309,32 +310,25 @@ def upsert_tabela_sandbox(client: bigquery.Client, df_novos: pd.DataFrame, nome_
         query = f"SELECT * FROM `{tabela_destino}`"
         df_existente = client.query(query).to_dataframe()
         
-        # Converter tipos de data para compatibilidade
+        # Normalizar tipos para compatibilidade
         if "data" in df_existente.columns:
             df_existente["data"] = pd.to_datetime(df_existente["data"]).dt.date
+        if "volume" in df_existente.columns:
+            df_existente["volume"] = pd.to_numeric(df_existente["volume"], errors="coerce").fillna(0).astype("int64")
             
         logger.info(f"Lidos {len(df_existente)} registros existentes de '{tabela_destino}'.")
         df_consolidado = pd.concat([df_existente, df_novos], ignore_index=True)
     except Exception as e:
-        logger.info(f"Tabela '{tabela_destino}' ainda não possui registros ou é nova carga. Criando inicial...")
+        logger.info(f"Tabela '{tabela_destino}' ainda não possui registros ou é nova carga: {e}")
         df_consolidado = df_novos
 
     # 2. Desduplica mantendo sempre a versão mais recente
     df_consolidado = df_consolidado.drop_duplicates(subset=chaves, keep="last")
     
-    # 3. Configurar Load Job com particionamento (WRITE_TRUNCATE substitui com base consolidada e limpa)
+    # 3. Load Job WRITE_TRUNCATE simples (respeita a estrutura pré-existente da tabela no BigQuery)
     job_config = bigquery.LoadJobConfig(
         write_disposition="WRITE_TRUNCATE"
     )
-    if "data" in df_consolidado.columns:
-        job_config.time_partitioning = bigquery.TimePartitioning(
-            type_=bigquery.TimePartitioningType.DAY,
-            field="data"
-        )
-    if "ticker" in df_consolidado.columns:
-        job_config.clustering_fields = ["ticker"]
-    if schema:
-        job_config.schema = schema
 
     logger.info(f"Carregando {len(df_consolidado)} registros consolidados em '{tabela_destino}'...")
     client.load_table_from_dataframe(df_consolidado, tabela_destino, job_config=job_config).result()
