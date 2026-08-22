@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-ATUALIZADOR AUTOMÁTICO B3 - GOOGLE BIGQUERY (SANDBOX FREE TIER COMPATIBLE)
+ATUALIZADOR AUTOMÁTICO B3 - GOOGLE BIGQUERY (BLINDADO E INCREMENTAL)
 ================================================================================
 Projeto: Pipeline de Dados B3 (Mercado Brasileiro) & Power BI
 Responsável: Karl Albert / Engenharia de Dados & BI
@@ -43,7 +43,7 @@ DATASET_ID = os.environ.get("DATASET_ID", "B3")
 LUNN_API_URL = os.environ.get("LUNN_API_URL")
 LUNN_API_KEY = os.environ.get("LUNN_API_KEY")
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://qhehkgxbpmpptshxlwrb.supabase.co")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
 # ==============================================================================
@@ -74,20 +74,6 @@ def obter_cliente_bigquery():
         raise e
 
 
-def garantir_dataset(client: bigquery.Client):
-    """Garante que o dataset B3 exista."""
-    dataset_ref = f"{GCP_PROJECT_ID}.{DATASET_ID}"
-    try:
-        client.get_dataset(dataset_ref)
-        logger.info(f"Dataset '{dataset_ref}' validado.")
-    except Exception:
-        logger.info(f"Criando dataset '{dataset_ref}'...")
-        dataset = bigquery.Dataset(dataset_ref)
-        dataset.location = "US"
-        client.create_dataset(dataset, exists_ok=True)
-        logger.info(f"Dataset '{dataset_ref}' criado com sucesso.")
-
-
 # ==============================================================================
 # 2. EXTRAÇÃO DE COTAÇÕES DA B3
 # ==============================================================================
@@ -108,11 +94,11 @@ def extrair_cotacoes_b3() -> pd.DataFrame:
         except Exception as e:
             logger.warning(f"Falha ao consultar API LUNN: {e}")
 
-    # 2. Tentar Supabase intermediário
+    # 2. Tentar Supabase intermediário (API_LUNN)
     if SUPABASE_URL and SUPABASE_KEY:
         try:
-            logger.info("Buscando cotações no Supabase (tabela fechamento_tickers)...")
-            url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/fechamento_tickers?select=*&order=data.desc&limit=5000"
+            logger.info(f"Buscando cotações no Supabase ({SUPABASE_URL})...")
+            url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/fechamento_tickers?select=*&order=data.desc&limit=10000"
             headers = {
                 "apikey": SUPABASE_KEY,
                 "Authorization": f"Bearer {SUPABASE_KEY}"
@@ -128,7 +114,7 @@ def extrair_cotacoes_b3() -> pd.DataFrame:
             logger.warning(f"Falha ao consultar Supabase: {e}")
 
     # 3. Fallback: Yahoo Finance
-    logger.info("Utilizando fallback automático via Yahoo Finance para mercado brasileiro (.SA)...")
+    logger.info("Utilizando fallback automático via Yahoo Finance para ações da B3 (.SA)...")
     return extrair_b3_via_yfinance()
 
 
@@ -163,7 +149,7 @@ def normalizar_df_tickers(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def extrair_b3_via_yfinance() -> pd.DataFrame:
-    """Coleta cotações diárias das principais empresas da B3 via yfinance."""
+    """Coleta cotações diárias via yfinance."""
     try:
         import yfinance as yf
     except ImportError:
@@ -171,12 +157,14 @@ def extrair_b3_via_yfinance() -> pd.DataFrame:
         return pd.DataFrame()
 
     tickers_b3 = [
-        "PETR4.SA", "VALE3.SA", "ITUB4.SA", "BBDC4.SA", "BBAS3.SA", "ABEV3.SA",
-        "WEGE3.SA", "RENT3.SA", "SUZB3.SA", "GGBR4.SA", "RAIL3.SA", "EQTL3.SA",
-        "LREN3.SA", "RADL3.SA", "PRIO3.SA", "RDOR3.SA", "VIVT3.SA", "CSNA3.SA",
-        "CMIG4.SA", "SBSP3.SA", "TIMS3.SA", "UGPA3.SA", "HAPV3.SA", "ASAI3.SA",
-        "EGIE3.SA", "KLBN11.SA", "MULT3.SA", "CYRE3.SA", "MRVE3.SA", "TOTS3.SA",
-        "CVCB3.SA", "MGLU3.SA", "BHIA3.SA", "B3SA3.SA"
+        "PETR4.SA", "PETR3.SA", "VALE3.SA", "ITUB4.SA", "BBDC4.SA", "BBDC3.SA",
+        "BBAS3.SA", "ABEV3.SA", "WEGE3.SA", "RENT3.SA", "SUZB3.SA", "GGBR4.SA",
+        "RAIL3.SA", "EQTL3.SA", "LREN3.SA", "RADL3.SA", "PRIO3.SA", "RDOR3.SA",
+        "VIVT3.SA", "CSNA3.SA", "CMIG4.SA", "SBSP3.SA", "TIMS3.SA", "UGPA3.SA",
+        "HAPV3.SA", "ASAI3.SA", "EGIE3.SA", "KLBN11.SA", "MULT3.SA", "CYRE3.SA",
+        "MRVE3.SA", "TOTS3.SA", "CVCB3.SA", "MGLU3.SA", "BHIA3.SA", "B3SA3.SA",
+        "CPFE3.SA", "BRFS3.SA", "VBBR3.SA", "ENEV3.SA", "EMBR3.SA", "BPAC11.SA",
+        "SANB11.SA", "ITSA4.SA", "BBSE3.SA", "CXSE3.SA", "SMTO3.SA", "SLCE3.SA"
     ]
     
     logger.info(f"Baixando {len(tickers_b3)} ativos da B3 via Yahoo Finance (janela 5d)...")
@@ -284,20 +272,21 @@ def extrair_fechamento_dolar() -> pd.DataFrame:
             df = pd.DataFrame(registros)
             df["data"] = pd.to_datetime(df["data"]).dt.date
             return df.drop_duplicates(subset=["data"], keep="last")
-        logger.warning(f"AwesomeAPI retornou status {resp.status_code}")
     except Exception as e:
         logger.warning(f"Não foi possível obter cotações do Dólar: {e}")
     return pd.DataFrame()
 
 
 # ==============================================================================
-# 4. CARGA INCREMENTAL (SANDBOX FREE TIER COMPATIBLE - SEM QUERIES DML MERGE)
+# 4. CARGA INCREMENTAL BLINDADA (PRESERVA 100% DO HISTÓRICO)
 # ==============================================================================
-def upsert_tabela_sandbox(client: bigquery.Client, df_novos: pd.DataFrame, nome_tabela: str, chaves: list):
+def upsert_tabela_blindada(client: bigquery.Client, df_novos: pd.DataFrame, nome_tabela: str, chaves: list):
     """
-    Realiza carga/upsert incremental 100% compatível com BigQuery Free Tier (Sandbox).
-    Substitui queries DML (MERGE/UPDATE) por Load Jobs com desduplicação em memória.
-    Preserva a especificação de partição nativa da tabela destino no BigQuery.
+    Carga incremental blindada:
+    1. Lê a base completa existente no BigQuery para garantir integridade.
+    2. Consolida com os novos registros e desduplica pelas chaves.
+    3. Valida se o total consolidado é maior ou igual ao histórico existente (trava de segurança).
+    4. Carrega os dados consolidados com segurança.
     """
     if df_novos is None or df_novos.empty:
         logger.info(f"Nenhum dado novo para a tabela '{nome_tabela}'.")
@@ -305,34 +294,36 @@ def upsert_tabela_sandbox(client: bigquery.Client, df_novos: pd.DataFrame, nome_
 
     tabela_destino = f"{GCP_PROJECT_ID}.{DATASET_ID}.{nome_tabela}"
     
-    # 1. Ler dados existentes se a tabela já existir
     try:
         query = f"SELECT * FROM `{tabela_destino}`"
         df_existente = client.query(query).to_dataframe()
         
-        # Normalizar tipos para compatibilidade
         if "data" in df_existente.columns:
             df_existente["data"] = pd.to_datetime(df_existente["data"]).dt.date
         if "volume" in df_existente.columns:
             df_existente["volume"] = pd.to_numeric(df_existente["volume"], errors="coerce").fillna(0).astype("int64")
             
-        logger.info(f"Lidos {len(df_existente)} registros existentes de '{tabela_destino}'.")
+        qtd_existente = len(df_existente)
+        logger.info(f"Lidos {qtd_existente} registros históricos existentes de '{tabela_destino}'.")
         df_consolidado = pd.concat([df_existente, df_novos], ignore_index=True)
     except Exception as e:
-        logger.info(f"Tabela '{tabela_destino}' ainda não possui registros ou é nova carga: {e}")
+        logger.info(f"Tabela '{tabela_destino}' vazia ou nova: {e}")
+        qtd_existente = 0
         df_consolidado = df_novos
 
-    # 2. Desduplica mantendo sempre a versão mais recente
+    # Desduplica mantendo sempre a versão mais recente
     df_consolidado = df_consolidado.drop_duplicates(subset=chaves, keep="last")
-    
-    # 3. Load Job WRITE_TRUNCATE simples (respeita a estrutura pré-existente da tabela no BigQuery)
-    job_config = bigquery.LoadJobConfig(
-        write_disposition="WRITE_TRUNCATE"
-    )
+    qtd_consolidada = len(df_consolidado)
 
-    logger.info(f"Carregando {len(df_consolidado)} registros consolidados em '{tabela_destino}'...")
+    # TRAVA DE SEGURANÇA: Se a base consolidada tiver menos linhas que a existente, aborta para não perder dados!
+    if qtd_existente > 0 and qtd_consolidada < qtd_existente:
+        logger.error(f"❌ [TRAVA DE SEGURANÇA ACIONADA] Carga abortada: base consolidada ({qtd_consolidada}) menor que existente ({qtd_existente})!")
+        return
+
+    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
+    logger.info(f"Carregando {qtd_consolidada} registros totais em '{tabela_destino}'...")
     client.load_table_from_dataframe(df_consolidado, tabela_destino, job_config=job_config).result()
-    logger.info(f"✅ [SUCESSO] Tabela '{tabela_destino}' atualizada com sucesso ({len(df_consolidado)} registros totais).")
+    logger.info(f"✅ [SUCESSO] Tabela '{tabela_destino}' atualizada com sucesso ({qtd_consolidada} registros preservados).")
 
 
 # ==============================================================================
@@ -343,21 +334,19 @@ def main():
     logger.info(f"INICIANDO ROTINA DE ATUALIZAÇÃO B3 -> BIGQUERY [{datetime.now()}]")
     logger.info("=" * 70)
 
-    # 1. Conectar e validar dataset
     client = obter_cliente_bigquery()
-    garantir_dataset(client)
 
-    # 2. Atualizar Tickers da B3
+    # 1. Atualizar Tickers da B3
     df_tickers = extrair_cotacoes_b3()
-    upsert_tabela_sandbox(client, df_tickers, "fechamento_tickers", chaves=["ticker", "data"])
+    upsert_tabela_blindada(client, df_tickers, "fechamento_tickers", chaves=["ticker", "data"])
 
-    # 3. Atualizar Ibovespa
+    # 2. Atualizar Ibovespa
     df_ibov = extrair_fechamento_ibov()
-    upsert_tabela_sandbox(client, df_ibov, "fechamento_ibov", chaves=["data"])
+    upsert_tabela_blindada(client, df_ibov, "fechamento_ibov", chaves=["data"])
 
-    # 4. Atualizar Dólar
+    # 3. Atualizar Dólar
     df_dolar = extrair_fechamento_dolar()
-    upsert_tabela_sandbox(client, df_dolar, "fechamento_dolar", chaves=["data"])
+    upsert_tabela_blindada(client, df_dolar, "fechamento_dolar", chaves=["data"])
 
     logger.info("=" * 70)
     logger.info("PIPELINE B3 FINALIZADO COM SUCESSO NO BIGQUERY!")
