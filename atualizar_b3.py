@@ -2,13 +2,13 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-ATUALIZADOR AUTOMÁTICO B3 - GOOGLE BIGQUERY (BLINDADO E INCREMENTAL)
+ATUALIZADOR AUTOMÁTICO B3 - GOOGLE BIGQUERY (UNIVERSAL & MULTI-THREADED)
 ================================================================================
 Projeto: Pipeline de Dados B3 (Mercado Brasileiro) & Power BI
 Responsável: Karl Albert / Engenharia de Dados & BI
 Destino: Google BigQuery (Dataset: B3)
 Tabelas:
-  - fechamento_tickers (Fato: Cotações diárias/intraday de ações da B3)
+  - fechamento_tickers (Fato: Cotações diárias/intraday de todas as ações da B3)
   - fechamento_ibov    (Fato: Pontos, máximas, mínimas e volume do Ibovespa)
   - fechamento_dolar   (Fato: Cotação USD/BRL PTAX / Fechamento)
   - ativos_board       (Dimensão: Ativos monitorados, setores e status)
@@ -24,6 +24,7 @@ import requests
 import pandas as pd
 from google.cloud import bigquery
 from google.oauth2 import service_account
+from concurrent.futures import ThreadPoolExecutor
 
 # Configuração de Logging
 logging.basicConfig(
@@ -45,6 +46,10 @@ LUNN_API_KEY = os.environ.get("LUNN_API_KEY")
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://qhehkgxbpmpptshxlwrb.supabase.co")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+
+HEADERS_REQ = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+}
 
 # ==============================================================================
 # 1. CLIENTE BIGQUERY
@@ -75,10 +80,10 @@ def obter_cliente_bigquery():
 
 
 # ==============================================================================
-# 2. EXTRAÇÃO DE COTAÇÕES DA B3
+# 2. EXTRAÇÃO DE COTAÇÕES DE TODAS AS AÇÕES DA B3
 # ==============================================================================
-def extrair_cotacoes_b3() -> pd.DataFrame:
-    """Extrai cotações da B3 via API LUNN, Supabase ou Yahoo Finance."""
+def extrair_cotacoes_b3(client: bigquery.Client) -> pd.DataFrame:
+    """Extrai cotações da B3 via API LUNN, Supabase ou Yahoo Finance para todos os ativos."""
     # 1. Tentar API LUNN
     if LUNN_API_URL:
         try:
@@ -94,7 +99,7 @@ def extrair_cotacoes_b3() -> pd.DataFrame:
         except Exception as e:
             logger.warning(f"Falha ao consultar API LUNN: {e}")
 
-    # 2. Tentar Supabase intermediário (API_LUNN)
+    # 2. Tentar Supabase intermediário
     if SUPABASE_URL and SUPABASE_KEY:
         try:
             logger.info(f"Buscando cotações no Supabase ({SUPABASE_URL})...")
@@ -113,9 +118,76 @@ def extrair_cotacoes_b3() -> pd.DataFrame:
         except Exception as e:
             logger.warning(f"Falha ao consultar Supabase: {e}")
 
-    # 3. Fallback: Yahoo Finance
-    logger.info("Utilizando fallback automático via Yahoo Finance para ações da B3 (.SA)...")
-    return extrair_b3_via_yfinance()
+    # 3. Fallback: Extração paralela de todos os tickers cadastrados no BigQuery
+    logger.info("Executando extração em lote para todos os tickers monitorados da B3...")
+    return extrair_todos_tickers_yfinance(client)
+
+
+def extrair_todos_tickers_yfinance(client: bigquery.Client) -> pd.DataFrame:
+    """Extrai cotações recentes de todos os 579+ tickers da B3 em paralelo."""
+    try:
+        # Obter universo de tickers monitorados direto do BigQuery
+        q_tickers = f"SELECT DISTINCT ticker FROM `{GCP_PROJECT_ID}.{DATASET_ID}.fechamento_tickers` WHERE ticker IS NOT NULL"
+        df_t = client.query(q_tickers).to_dataframe()
+        tickers = df_t["ticker"].dropna().unique().tolist()
+        logger.info(f"Lista de {len(tickers)} ativos obtida do BigQuery para atualização.")
+    except Exception as e:
+        logger.warning(f"Erro ao obter lista de tickers do BigQuery: {e}. Usando lista base.")
+        tickers = ["PETR4", "VALE3", "ITUB4", "BBDC4", "BBAS3", "ABEV3", "WEGE3", "RENT3", "SUZB3", "GGBR4"]
+
+    def fetch_single_ticker(ticker):
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}.SA?range=10d&interval=1d"
+        try:
+            r = requests.get(url, headers=HEADERS_REQ, timeout=10)
+            if r.status_code == 200:
+                res = r.json()
+                result = res.get("chart", {}).get("result", [])
+                if result:
+                    meta = result[0].get("meta", {})
+                    reg_price = meta.get("regularMarketPrice")
+                    prev_close = meta.get("chartPreviousClose") or meta.get("previousClose")
+                    
+                    timestamps = result[0].get("timestamp", [])
+                    quotes = result[0].get("indicators", {}).get("quote", [{}])[0]
+                    closes = quotes.get("close", [])
+                    opens = quotes.get("open", [])
+                    volumes = quotes.get("volume", [])
+                    
+                    rows = []
+                    cutoff_date = date.today() - timedelta(days=7)
+                    for ts, c, o, v in zip(timestamps, closes, opens, volumes):
+                        d_dt = datetime.fromtimestamp(ts).date()
+                        if d_dt >= cutoff_date:
+                            preco_final = c if c is not None else reg_price
+                            if preco_final is not None:
+                                preco = round(float(preco_final), 2)
+                                open_p = float(o) if o is not None else (prev_close if prev_close else preco)
+                                base_var = prev_close if prev_close else open_p
+                                var = round(((preco - base_var) / base_var) * 100, 2) if base_var and base_var > 0 else 0.0
+                                vol = int(v) if v is not None else 0
+                                rows.append({
+                                    "ticker": ticker,
+                                    "data": d_dt,
+                                    "preco": preco,
+                                    "variacao": var,
+                                    "dy": 0.0,
+                                    "p_vp": 0.0,
+                                    "volume": vol
+                                })
+                    return rows
+        except Exception:
+            pass
+        return []
+
+    all_rows = []
+    with ThreadPoolExecutor(max_workers=30) as executor:
+        results = executor.map(fetch_single_ticker, tickers)
+        for r in results:
+            all_rows.extend(r)
+
+    df = pd.DataFrame(all_rows)
+    logger.info(f"Total de {len(df)} cotações coletadas para {df['ticker'].nunique() if not df.empty else 0} ativos.")
+    return normalizar_df_tickers(df)
 
 
 def normalizar_df_tickers(df: pd.DataFrame) -> pd.DataFrame:
@@ -148,105 +220,52 @@ def normalizar_df_tickers(df: pd.DataFrame) -> pd.DataFrame:
     return df[["ticker", "data", "preco", "variacao", "dy", "p_vp", "volume"]]
 
 
-def extrair_b3_via_yfinance() -> pd.DataFrame:
-    """Coleta cotações diárias via yfinance."""
-    try:
-        import yfinance as yf
-    except ImportError:
-        logger.error("yfinance não instalado.")
-        return pd.DataFrame()
-
-    tickers_b3 = [
-        "PETR4.SA", "PETR3.SA", "VALE3.SA", "ITUB4.SA", "BBDC4.SA", "BBDC3.SA",
-        "BBAS3.SA", "ABEV3.SA", "WEGE3.SA", "RENT3.SA", "SUZB3.SA", "GGBR4.SA",
-        "RAIL3.SA", "EQTL3.SA", "LREN3.SA", "RADL3.SA", "PRIO3.SA", "RDOR3.SA",
-        "VIVT3.SA", "CSNA3.SA", "CMIG4.SA", "SBSP3.SA", "TIMS3.SA", "UGPA3.SA",
-        "HAPV3.SA", "ASAI3.SA", "EGIE3.SA", "KLBN11.SA", "MULT3.SA", "CYRE3.SA",
-        "MRVE3.SA", "TOTS3.SA", "CVCB3.SA", "MGLU3.SA", "BHIA3.SA", "B3SA3.SA",
-        "CPFE3.SA", "BRFS3.SA", "VBBR3.SA", "ENEV3.SA", "EMBR3.SA", "BPAC11.SA",
-        "SANB11.SA", "ITSA4.SA", "BBSE3.SA", "CXSE3.SA", "SMTO3.SA", "SLCE3.SA"
-    ]
-    
-    logger.info(f"Baixando {len(tickers_b3)} ativos da B3 via Yahoo Finance (janela 5d)...")
-    registros = []
-    
-    for t in tickers_b3:
-        clean_ticker = t.replace(".SA", "")
-        try:
-            tk = yf.Ticker(t)
-            hist = tk.history(period="5d", interval="1d")
-            if hist.empty:
-                continue
-            for idx, row in hist.iterrows():
-                d_dt = idx.date()
-                preco = round(float(row["Close"]), 2)
-                open_p = float(row["Open"]) if pd.notnull(row["Open"]) else preco
-                var = round(((preco - open_p) / open_p) * 100, 2) if open_p > 0 else 0.0
-                vol = int(row["Volume"]) if pd.notnull(row["Volume"]) else 0
-                registros.append({
-                    "ticker": clean_ticker,
-                    "data": d_dt,
-                    "preco": preco,
-                    "variacao": var,
-                    "dy": 0.0,
-                    "p_vp": 0.0,
-                    "volume": vol
-                })
-        except Exception as e:
-            logger.debug(f"Aviso no ticker {t}: {e}")
-            continue
-
-    df = pd.DataFrame(registros)
-    if df.empty:
-        return pd.DataFrame()
-    return normalizar_df_tickers(df)
-
-
 # ==============================================================================
 # 3. EXTRAÇÃO DO IBOVESPA E DÓLAR
 # ==============================================================================
 def extrair_fechamento_ibov() -> pd.DataFrame:
     """Obtém os últimos pontos e volume do Ibovespa."""
     try:
-        import yfinance as yf
-        logger.info("Extraindo dados do índice Ibovespa (^BVSP)...")
-        ibov = yf.Ticker("^BVSP")
-        hist = ibov.history(period="5d", interval="1d")
-        if hist.empty:
-            return pd.DataFrame()
-        
-        registros = []
-        for idx, row in hist.iterrows():
-            d_dt = idx.date()
-            abertura = round(float(row["Open"]), 2)
-            maxima = round(float(row["High"]), 2)
-            minima = round(float(row["Low"]), 2)
-            fechamento = round(float(row["Close"]), 2)
-            var = round(((fechamento - abertura) / abertura) * 100, 2) if abertura > 0 else 0.0
-            vol = int(row["Volume"]) if pd.notnull(row["Volume"]) else 0
+        url_ibov = "https://query1.finance.yahoo.com/v8/finance/chart/%5EBVSP?range=10d&interval=1d"
+        r_ibov = requests.get(url_ibov, headers=HEADERS_REQ, timeout=10)
+        if r_ibov.status_code == 200:
+            res = r_ibov.json()
+            result = res.get("chart", {}).get("result", [])[0]
+            meta = result.get("meta", {})
+            reg_price = meta.get("regularMarketPrice")
+            prev_close = meta.get("chartPreviousClose")
             
-            registros.append({
-                "data": d_dt,
-                "abertura": abertura,
-                "maxima": maxima,
-                "minima": minima,
-                "fechamento": fechamento,
-                "ultimo": fechamento,
-                "variacao": var,
-                "volume": vol
-            })
-        df = pd.DataFrame(registros)
-        df["data"] = pd.to_datetime(df["data"]).dt.date
-        return df.drop_duplicates(subset=["data"], keep="last")
+            timestamps = result.get("timestamp", [])
+            quotes = result.get("indicators", {}).get("quote", [{}])[0]
+            rows_ibov = []
+            cutoff_date = date.today() - timedelta(days=7)
+            for ts, c, o, h, l, v in zip(timestamps, quotes.get("close", []), quotes.get("open", []), quotes.get("high", []), quotes.get("low", []), quotes.get("volume", [])):
+                d_dt = datetime.fromtimestamp(ts).date()
+                if d_dt >= cutoff_date:
+                    fech_raw = c if c is not None else reg_price
+                    if fech_raw:
+                        fech = round(float(fech_raw), 2)
+                        abert = round(float(o), 2) if o else (prev_close if prev_close else fech)
+                        maxi = round(float(h), 2) if h else fech
+                        mini = round(float(l), 2) if l else fech
+                        var = round(((fech - prev_close) / prev_close) * 100, 2) if prev_close else 0.0
+                        vol = int(v) if v else 0
+                        rows_ibov.append({
+                            "data": d_dt, "abertura": abert, "maxima": maxi, "minima": mini,
+                            "fechamento": fech, "ultimo": fech, "variacao": var, "volume": vol
+                        })
+            if rows_ibov:
+                df = pd.DataFrame(rows_ibov)
+                df["data"] = pd.to_datetime(df["data"]).dt.date
+                return df.drop_duplicates(subset=["data"], keep="last")
     except Exception as e:
         logger.warning(f"Não foi possível obter dados do IBOV: {e}")
-        return pd.DataFrame()
+    return pd.DataFrame()
 
 
 def extrair_fechamento_dolar() -> pd.DataFrame:
     """Obtém cotações diárias do Dólar Comercial (USD/BRL) via AwesomeAPI."""
     try:
-        logger.info("Extraindo cotações do Dólar USD/BRL via AwesomeAPI...")
         url = "https://economia.awesomeapi.com.br/json/daily/USD-BRL/15"
         resp = requests.get(url, timeout=30)
         if resp.status_code == 200:
@@ -337,7 +356,7 @@ def main():
     client = obter_cliente_bigquery()
 
     # 1. Atualizar Tickers da B3
-    df_tickers = extrair_cotacoes_b3()
+    df_tickers = extrair_cotacoes_b3(client)
     upsert_tabela_blindada(client, df_tickers, "fechamento_tickers", chaves=["ticker", "data"])
 
     # 2. Atualizar Ibovespa
