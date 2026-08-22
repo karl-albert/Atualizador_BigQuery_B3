@@ -1,0 +1,39 @@
+name: Rotina Atualização B3 BigQuery
+
+on:
+  schedule:
+    # 10h30, 14h00 e 18h30 Horário de Brasília (UTC-3) de Segunda a Sexta
+    - cron: '30 13,17,21 * * 1-5'
+  workflow_dispatch: # Permite disparo manual com um clique no GitHub Actions
+
+jobs:
+  atualizar-b3:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: 📥 Clonar Repositório
+        uses: actions/checkout@v4
+
+      - name: 🐍 Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 📦 Instalar Dependências
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 🚀 Executar Atualização da B3 no BigQuery
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID || 'project-1c5de651-f9e1-439e-854' }}
+          DATASET_ID: 'B3'
+          LUNN_API_URL: ${{ secrets.LUNN_API_URL }}
+          LUNN_API_KEY: ${{ secrets.LUNN_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          python atualizar_b3.py
