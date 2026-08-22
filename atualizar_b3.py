@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-ATUALIZADOR AUTOMÁTICO B3 - GOOGLE BIGQUERY
+ATUALIZADOR AUTOMÁTICO B3 - GOOGLE BIGQUERY (SANDBOX FREE TIER COMPATIBLE)
 ================================================================================
 Projeto: Pipeline de Dados B3 (Mercado Brasileiro) & Power BI
 Responsável: Karl Albert / Engenharia de Dados & BI
@@ -25,7 +25,7 @@ import pandas as pd
 from google.cloud import bigquery
 from google.oauth2 import service_account
 
-# Configuração de Logging com formato profissional
+# Configuração de Logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -54,34 +54,29 @@ def obter_cliente_bigquery():
     try:
         if GCP_SA_KEY:
             try:
-                # Tenta interpretar como JSON string
                 sa_info = json.loads(GCP_SA_KEY)
                 credentials = service_account.Credentials.from_service_account_info(sa_info)
                 client = bigquery.Client(project=GCP_PROJECT_ID, credentials=credentials)
                 logger.info(f"Conectado ao BigQuery com Service Account no projeto '{GCP_PROJECT_ID}'.")
                 return client
             except json.JSONDecodeError:
-                # Se for caminho de arquivo
                 if os.path.exists(GCP_SA_KEY):
                     credentials = service_account.Credentials.from_service_account_file(GCP_SA_KEY)
                     client = bigquery.Client(project=GCP_PROJECT_ID, credentials=credentials)
                     logger.info(f"Conectado ao BigQuery via arquivo de credenciais no projeto '{GCP_PROJECT_ID}'.")
                     return client
         
-        # Fallback para credenciais padrão do ambiente (gcloud auth)
         client = bigquery.Client(project=GCP_PROJECT_ID)
-        logger.info(f"Conectado ao BigQuery via Application Default Credentials (ADC) no projeto '{GCP_PROJECT_ID}'.")
+        logger.info(f"Conectado ao BigQuery via ADC no projeto '{GCP_PROJECT_ID}'.")
         return client
     except Exception as e:
         logger.error(f"Erro crítico ao inicializar cliente do BigQuery: {e}")
         raise e
 
 
-def garantir_dataset_e_tabelas(client: bigquery.Client):
-    """Garante que o dataset e as tabelas existam com particionamento adequado."""
+def garantir_dataset(client: bigquery.Client):
+    """Garante que o dataset B3 exista."""
     dataset_ref = f"{GCP_PROJECT_ID}.{DATASET_ID}"
-    
-    # Criar dataset se não existir
     try:
         client.get_dataset(dataset_ref)
         logger.info(f"Dataset '{dataset_ref}' validado.")
@@ -92,96 +87,13 @@ def garantir_dataset_e_tabelas(client: bigquery.Client):
         client.create_dataset(dataset, exists_ok=True)
         logger.info(f"Dataset '{dataset_ref}' criado com sucesso.")
 
-    # 1. Tabela fechamento_tickers (Particionada por data e clusterizada por ticker)
-    tabela_tickers = f"{dataset_ref}.fechamento_tickers"
-    schema_tickers = [
-        bigquery.SchemaField("ticker", "STRING", mode="REQUIRED"),
-        bigquery.SchemaField("data", "DATE", mode="REQUIRED"),
-        bigquery.SchemaField("preco", "FLOAT64", mode="NULLABLE"),
-        bigquery.SchemaField("variacao", "FLOAT64", mode="NULLABLE"),
-        bigquery.SchemaField("dy", "FLOAT64", mode="NULLABLE"),
-        bigquery.SchemaField("p_vp", "FLOAT64", mode="NULLABLE"),
-        bigquery.SchemaField("volume", "INT64", mode="NULLABLE"),
-    ]
-    try:
-        client.get_table(tabela_tickers)
-    except Exception:
-        table = bigquery.Table(tabela_tickers, schema=schema_tickers)
-        table.time_partitioning = bigquery.TimePartitioning(
-            type_=bigquery.TimePartitioningType.DAY,
-            field="data"
-        )
-        table.clustering_fields = ["ticker"]
-        client.create_table(table, exists_ok=True)
-        logger.info(f"Tabela particionada '{tabela_tickers}' criada.")
-
-    # 2. Tabela fechamento_ibov
-    tabela_ibov = f"{dataset_ref}.fechamento_ibov"
-    schema_ibov = [
-        bigquery.SchemaField("data", "DATE", mode="REQUIRED"),
-        bigquery.SchemaField("abertura", "FLOAT64", mode="NULLABLE"),
-        bigquery.SchemaField("maxima", "FLOAT64", mode="NULLABLE"),
-        bigquery.SchemaField("minima", "FLOAT64", mode="NULLABLE"),
-        bigquery.SchemaField("fechamento", "FLOAT64", mode="NULLABLE"),
-        bigquery.SchemaField("ultimo", "FLOAT64", mode="NULLABLE"),
-        bigquery.SchemaField("variacao", "FLOAT64", mode="NULLABLE"),
-        bigquery.SchemaField("volume", "INT64", mode="NULLABLE"),
-    ]
-    try:
-        client.get_table(tabela_ibov)
-    except Exception:
-        table = bigquery.Table(tabela_ibov, schema=schema_ibov)
-        table.time_partitioning = bigquery.TimePartitioning(
-            type_=bigquery.TimePartitioningType.DAY,
-            field="data"
-        )
-        client.create_table(table, exists_ok=True)
-        logger.info(f"Tabela '{tabela_ibov}' criada.")
-
-    # 3. Tabela fechamento_dolar
-    tabela_dolar = f"{dataset_ref}.fechamento_dolar"
-    schema_dolar = [
-        bigquery.SchemaField("data", "DATE", mode="REQUIRED"),
-        bigquery.SchemaField("compra", "FLOAT64", mode="NULLABLE"),
-        bigquery.SchemaField("venda", "FLOAT64", mode="NULLABLE"),
-        bigquery.SchemaField("maxima", "FLOAT64", mode="NULLABLE"),
-        bigquery.SchemaField("minima", "FLOAT64", mode="NULLABLE"),
-        bigquery.SchemaField("variacao", "FLOAT64", mode="NULLABLE"),
-    ]
-    try:
-        client.get_table(tabela_dolar)
-    except Exception:
-        table = bigquery.Table(tabela_dolar, schema=schema_dolar)
-        table.time_partitioning = bigquery.TimePartitioning(
-            type_=bigquery.TimePartitioningType.DAY,
-            field="data"
-        )
-        client.create_table(table, exists_ok=True)
-        logger.info(f"Tabela '{tabela_dolar}' criada.")
-
-    # 4. Tabela ativos_board (Dimensão)
-    tabela_ativos = f"{dataset_ref}.ativos_board"
-    schema_ativos = [
-        bigquery.SchemaField("ticker", "STRING", mode="REQUIRED"),
-        bigquery.SchemaField("nome_empresa", "STRING", mode="NULLABLE"),
-        bigquery.SchemaField("setor_atuacao", "STRING", mode="NULLABLE"),
-        bigquery.SchemaField("ticker_inativo", "BOOLEAN", mode="NULLABLE"),
-        bigquery.SchemaField("destino", "STRING", mode="NULLABLE"),
-    ]
-    try:
-        client.get_table(tabela_ativos)
-    except Exception:
-        table = bigquery.Table(tabela_ativos, schema=schema_ativos)
-        client.create_table(table, exists_ok=True)
-        logger.info(f"Tabela '{tabela_ativos}' criada.")
-
 
 # ==============================================================================
-# 2. EXTRAÇÃO DE COTAÇÕES DA B3 (API LUNN / SUPABASE / YAHOO FINANCE FALLBACK)
+# 2. EXTRAÇÃO DE COTAÇÕES DA B3
 # ==============================================================================
 def extrair_cotacoes_b3() -> pd.DataFrame:
     """Extrai cotações da B3 via API LUNN, Supabase ou Yahoo Finance."""
-    # 1. Tentar API LUNN se configurada
+    # 1. Tentar API LUNN
     if LUNN_API_URL:
         try:
             logger.info(f"Consultando API LUNN em: {LUNN_API_URL}...")
@@ -193,11 +105,10 @@ def extrair_cotacoes_b3() -> pd.DataFrame:
                 if not df.empty:
                     logger.info(f"Sucesso na API LUNN: {len(df)} cotações obtidas.")
                     return normalizar_df_tickers(df)
-            logger.warning(f"API LUNN retornou status {resp.status_code}. Tentando canal alternativo...")
         except Exception as e:
             logger.warning(f"Falha ao consultar API LUNN: {e}")
 
-    # 2. Tentar Supabase intermediário se configurado
+    # 2. Tentar Supabase intermediário
     if SUPABASE_URL and SUPABASE_KEY:
         try:
             logger.info("Buscando cotações no Supabase (tabela fechamento_tickers)...")
@@ -216,14 +127,13 @@ def extrair_cotacoes_b3() -> pd.DataFrame:
         except Exception as e:
             logger.warning(f"Falha ao consultar Supabase: {e}")
 
-    # 3. Fallback inteligente: Yahoo Finance para principais ações da B3 (.SA)
+    # 3. Fallback: Yahoo Finance
     logger.info("Utilizando fallback automático via Yahoo Finance para mercado brasileiro (.SA)...")
     return extrair_b3_via_yfinance()
 
 
 def normalizar_df_tickers(df: pd.DataFrame) -> pd.DataFrame:
     """Padroniza tipos e colunas da tabela de tickers."""
-    # Renomear colunas se vierem com nomes em inglês ou maiúsculas
     col_map = {
         "Ticker": "ticker", "TICKER": "ticker",
         "Data": "data", "DATA": "data", "date": "data",
@@ -235,7 +145,6 @@ def normalizar_df_tickers(df: pd.DataFrame) -> pd.DataFrame:
     }
     df = df.rename(columns=col_map)
     
-    # Garantir colunas obrigatórias
     for col in ["ticker", "data", "preco", "variacao", "dy", "p_vp", "volume"]:
         if col not in df.columns:
             df[col] = None
@@ -248,9 +157,7 @@ def normalizar_df_tickers(df: pd.DataFrame) -> pd.DataFrame:
     df["p_vp"] = pd.to_numeric(df["p_vp"], errors="coerce").fillna(0.0)
     df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0).astype("int64")
 
-    # Remover linhas sem ticker ou sem data
     df = df.dropna(subset=["ticker", "data"])
-    # Remover duplicatas no lote
     df = df.drop_duplicates(subset=["ticker", "data"], keep="last")
     return df[["ticker", "data", "preco", "variacao", "dy", "p_vp", "volume"]]
 
@@ -265,47 +172,45 @@ def extrair_b3_via_yfinance() -> pd.DataFrame:
 
     tickers_b3 = [
         "PETR4.SA", "VALE3.SA", "ITUB4.SA", "BBDC4.SA", "BBAS3.SA", "ABEV3.SA",
-        "WEGE3.SA", "RENT3.SA", "SUZB3.SA", "GGBR4.SA", "JBSS3.SA", "RAIL3.SA",
-        "EQTL3.SA", "LREN3.SA", "RADL3.SA", "PRIO3.SA", "RDOR3.SA", "VIVT3.SA",
-        "EMBR3.SA", "CSNA3.SA", "CPLE6.SA", "CMIG4.SA", "SBSP3.SA", "TIMS3.SA",
-        "UGPA3.SA", "HAPV3.SA", "ASAI3.SA", "CRFB3.SA", "CCRO3.SA", "ELET3.SA",
-        "ELET6.SA", "EGIE3.SA", "KLBN11.SA", "MULT3.SA", "CYRE3.SA", "MRVE3.SA",
-        "TOTS3.SA", "AZUL4.SA", "CVCB3.SA", "MGLU3.SA", "BHIA3.SA", "B3SA3.SA"
+        "WEGE3.SA", "RENT3.SA", "SUZB3.SA", "GGBR4.SA", "RAIL3.SA", "EQTL3.SA",
+        "LREN3.SA", "RADL3.SA", "PRIO3.SA", "RDOR3.SA", "VIVT3.SA", "CSNA3.SA",
+        "CMIG4.SA", "SBSP3.SA", "TIMS3.SA", "UGPA3.SA", "HAPV3.SA", "ASAI3.SA",
+        "EGIE3.SA", "KLBN11.SA", "MULT3.SA", "CYRE3.SA", "MRVE3.SA", "TOTS3.SA",
+        "CVCB3.SA", "MGLU3.SA", "BHIA3.SA", "B3SA3.SA"
     ]
     
     logger.info(f"Baixando {len(tickers_b3)} ativos da B3 via Yahoo Finance (janela 5d)...")
-    try:
-        data = yf.download(tickers_b3, period="5d", interval="1d", group_by="ticker", auto_adjust=False, threads=True)
-    except Exception as e:
-        logger.error(f"Erro no download yfinance: {e}")
-        return pd.DataFrame()
-
     registros = []
+    
     for t in tickers_b3:
         clean_ticker = t.replace(".SA", "")
         try:
-            if clean_ticker in data or t in data:
-                sub_df = data[t] if t in data else data[clean_ticker]
-                sub_df = sub_df.dropna(subset=["Close"])
-                for idx, row in sub_df.iterrows():
-                    d_dt = idx.date()
-                    preco = float(row["Close"])
-                    open_p = float(row["Open"]) if pd.notnull(row["Open"]) else preco
-                    var = ((preco - open_p) / open_p) * 100 if open_p > 0 else 0.0
-                    vol = int(row["Volume"]) if pd.notnull(row["Volume"]) else 0
-                    registros.append({
-                        "ticker": clean_ticker,
-                        "data": d_dt,
-                        "preco": round(preco, 2),
-                        "variacao": round(var, 2),
-                        "dy": 0.0,
-                        "p_vp": 0.0,
-                        "volume": vol
-                    })
-        except Exception:
+            tk = yf.Ticker(t)
+            hist = tk.history(period="5d", interval="1d")
+            if hist.empty:
+                continue
+            for idx, row in hist.iterrows():
+                d_dt = idx.date()
+                preco = round(float(row["Close"]), 2)
+                open_p = float(row["Open"]) if pd.notnull(row["Open"]) else preco
+                var = round(((preco - open_p) / open_p) * 100, 2) if open_p > 0 else 0.0
+                vol = int(row["Volume"]) if pd.notnull(row["Volume"]) else 0
+                registros.append({
+                    "ticker": clean_ticker,
+                    "data": d_dt,
+                    "preco": preco,
+                    "variacao": var,
+                    "dy": 0.0,
+                    "p_vp": 0.0,
+                    "volume": vol
+                })
+        except Exception as e:
+            logger.debug(f"Aviso no ticker {t}: {e}")
             continue
 
     df = pd.DataFrame(registros)
+    if df.empty:
+        return pd.DataFrame()
     return normalizar_df_tickers(df)
 
 
@@ -381,106 +286,59 @@ def extrair_fechamento_dolar() -> pd.DataFrame:
             return df.drop_duplicates(subset=["data"], keep="last")
         logger.warning(f"AwesomeAPI retornou status {resp.status_code}")
     except Exception as e:
-        logger.warning(f"Não foi possível obter cotações do Dólar via AwesomeAPI: {e}")
+        logger.warning(f"Não foi possível obter cotações do Dólar: {e}")
     return pd.DataFrame()
 
 
 # ==============================================================================
-# 4. CARGA INCREMENTAL COM SQL MERGE NO BIGQUERY
+# 4. CARGA INCREMENTAL (SANDBOX FREE TIER COMPATIBLE - SEM QUERIES DML MERGE)
 # ==============================================================================
-def upsert_fechamento_tickers(client: bigquery.Client, df: pd.DataFrame):
-    """Executa o MERGE de cotações de tickers no BigQuery."""
-    if df.empty:
-        logger.info("Nenhum dado de ticker para atualizar.")
+def upsert_tabela_sandbox(client: bigquery.Client, df_novos: pd.DataFrame, nome_tabela: str, chaves: list, schema: list = None):
+    """
+    Realiza carga/upsert incremental 100% compatível com BigQuery Free Tier (Sandbox).
+    Substitui queries DML (MERGE/UPDATE) por Load Jobs com desduplicação em memória.
+    """
+    if df_novos is None or df_novos.empty:
+        logger.info(f"Nenhum dado novo para a tabela '{nome_tabela}'.")
         return
 
-    tabela_destino = f"{GCP_PROJECT_ID}.{DATASET_ID}.fechamento_tickers"
-    tabela_temp = f"{GCP_PROJECT_ID}.{DATASET_ID}.tmp_fechamento_tickers"
+    tabela_destino = f"{GCP_PROJECT_ID}.{DATASET_ID}.{nome_tabela}"
+    
+    # 1. Ler dados existentes se a tabela já existir
+    try:
+        query = f"SELECT * FROM `{tabela_destino}`"
+        df_existente = client.query(query).to_dataframe()
+        
+        # Converter tipos de data para compatibilidade
+        if "data" in df_existente.columns:
+            df_existente["data"] = pd.to_datetime(df_existente["data"]).dt.date
+            
+        logger.info(f"Lidos {len(df_existente)} registros existentes de '{tabela_destino}'.")
+        df_consolidado = pd.concat([df_existente, df_novos], ignore_index=True)
+    except Exception as e:
+        logger.info(f"Tabela '{tabela_destino}' ainda não possui registros ou é nova carga. Criando inicial...")
+        df_consolidado = df_novos
 
-    logger.info(f"Carregando {len(df)} linhas na tabela temporária '{tabela_temp}'...")
-    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
-    client.load_table_from_dataframe(df, tabela_temp, job_config=job_config).result()
+    # 2. Desduplica mantendo sempre a versão mais recente
+    df_consolidado = df_consolidado.drop_duplicates(subset=chaves, keep="last")
+    
+    # 3. Configurar Load Job com particionamento (WRITE_TRUNCATE substitui com base consolidada e limpa)
+    job_config = bigquery.LoadJobConfig(
+        write_disposition="WRITE_TRUNCATE"
+    )
+    if "data" in df_consolidado.columns:
+        job_config.time_partitioning = bigquery.TimePartitioning(
+            type_=bigquery.TimePartitioningType.DAY,
+            field="data"
+        )
+    if "ticker" in df_consolidado.columns:
+        job_config.clustering_fields = ["ticker"]
+    if schema:
+        job_config.schema = schema
 
-    query_merge = f"""
-    MERGE `{tabela_destino}` T
-    USING `{tabela_temp}` S
-    ON T.ticker = S.ticker AND T.data = S.data
-    WHEN MATCHED THEN
-      UPDATE SET 
-        preco = S.preco, 
-        variacao = S.variacao, 
-        dy = S.dy, 
-        p_vp = S.p_vp, 
-        volume = S.volume
-    WHEN NOT MATCHED THEN
-      INSERT (ticker, data, preco, variacao, dy, p_vp, volume)
-      VALUES (S.ticker, S.data, S.preco, S.variacao, S.dy, S.p_vp, S.volume);
-    """
-    logger.info(f"Executando MERGE em '{tabela_destino}'...")
-    client.query(query_merge).result()
-    logger.info(f"✅ [SUCESSO] Tabela '{tabela_destino}' atualizada com sucesso ({len(df)} registros processados).")
-
-
-def upsert_fechamento_ibov(client: bigquery.Client, df: pd.DataFrame):
-    """Executa o MERGE do Ibovespa no BigQuery."""
-    if df.empty:
-        return
-
-    tabela_destino = f"{GCP_PROJECT_ID}.{DATASET_ID}.fechamento_ibov"
-    tabela_temp = f"{GCP_PROJECT_ID}.{DATASET_ID}.tmp_fechamento_ibov"
-
-    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
-    client.load_table_from_dataframe(df, tabela_temp, job_config=job_config).result()
-
-    query_merge = f"""
-    MERGE `{tabela_destino}` T
-    USING `{tabela_temp}` S
-    ON T.data = S.data
-    WHEN MATCHED THEN
-      UPDATE SET 
-        abertura = S.abertura,
-        maxima = S.maxima,
-        minima = S.minima,
-        fechamento = S.fechamento,
-        ultimo = S.ultimo,
-        variacao = S.variacao,
-        volume = S.volume
-    WHEN NOT MATCHED THEN
-      INSERT (data, abertura, maxima, minima, fechamento, ultimo, variacao, volume)
-      VALUES (S.data, S.abertura, S.maxima, S.minima, S.fechamento, S.ultimo, S.variacao, S.volume);
-    """
-    client.query(query_merge).result()
-    logger.info(f"✅ [SUCESSO] Tabela '{tabela_destino}' atualizada.")
-
-
-def upsert_fechamento_dolar(client: bigquery.Client, df: pd.DataFrame):
-    """Executa o MERGE do Dólar no BigQuery."""
-    if df.empty:
-        return
-
-    tabela_destino = f"{GCP_PROJECT_ID}.{DATASET_ID}.fechamento_dolar"
-    tabela_temp = f"{GCP_PROJECT_ID}.{DATASET_ID}.tmp_fechamento_dolar"
-
-    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
-    client.load_table_from_dataframe(df, tabela_temp, job_config=job_config).result()
-
-    query_merge = f"""
-    MERGE `{tabela_destino}` T
-    USING `{tabela_temp}` S
-    ON T.data = S.data
-    WHEN MATCHED THEN
-      UPDATE SET 
-        compra = S.compra,
-        venda = S.venda,
-        maxima = S.maxima,
-        minima = S.minima,
-        variacao = S.variacao
-    WHEN NOT MATCHED THEN
-      INSERT (data, compra, venda, maxima, minima, variacao)
-      VALUES (S.data, S.compra, S.venda, S.maxima, S.minima, S.variacao);
-    """
-    client.query(query_merge).result()
-    logger.info(f"✅ [SUCESSO] Tabela '{tabela_destino}' atualizada.")
+    logger.info(f"Carregando {len(df_consolidado)} registros consolidados em '{tabela_destino}'...")
+    client.load_table_from_dataframe(df_consolidado, tabela_destino, job_config=job_config).result()
+    logger.info(f"✅ [SUCESSO] Tabela '{tabela_destino}' atualizada com sucesso ({len(df_consolidado)} registros totais).")
 
 
 # ==============================================================================
@@ -491,24 +349,24 @@ def main():
     logger.info(f"INICIANDO ROTINA DE ATUALIZAÇÃO B3 -> BIGQUERY [{datetime.now()}]")
     logger.info("=" * 70)
 
-    # 1. Conectar e validar estrutura no BigQuery
+    # 1. Conectar e validar dataset
     client = obter_cliente_bigquery()
-    garantir_dataset_e_tabelas(client)
+    garantir_dataset(client)
 
-    # 2. Extrair e fazer Upsert de Tickers da B3
+    # 2. Atualizar Tickers da B3
     df_tickers = extrair_cotacoes_b3()
-    upsert_fechamento_tickers(client, df_tickers)
+    upsert_tabela_sandbox(client, df_tickers, "fechamento_tickers", chaves=["ticker", "data"])
 
-    # 3. Extrair e fazer Upsert do Ibovespa
+    # 3. Atualizar Ibovespa
     df_ibov = extrair_fechamento_ibov()
-    upsert_fechamento_ibov(client, df_ibov)
+    upsert_tabela_sandbox(client, df_ibov, "fechamento_ibov", chaves=["data"])
 
-    # 4. Extrair e fazer Upsert do Dólar
+    # 4. Atualizar Dólar
     df_dolar = extrair_fechamento_dolar()
-    upsert_fechamento_dolar(client, df_dolar)
+    upsert_tabela_sandbox(client, df_dolar, "fechamento_dolar", chaves=["data"])
 
     logger.info("=" * 70)
-    logger.info("PIPELINE B3 FINALIZADO COM SUCESSO!")
+    logger.info("PIPELINE B3 FINALIZADO COM SUCESSO NO BIGQUERY!")
     logger.info("=" * 70)
 
 
