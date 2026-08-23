@@ -6,7 +6,7 @@ ATUALIZADOR AUTOMÁTICO B3 - GOOGLE BIGQUERY (UNIVERSAL & MULTI-THREADED)
 ================================================================================
 Projeto: Pipeline de Dados B3 (Mercado Brasileiro) & Power BI
 Responsável: Karl Albert / Engenharia de Dados & BI
-Destino: Google BigQuery (Dataset: B3)
+Destino: Google BigQuery (Projeto: b3-brasil-bolsa-balcao | Dataset: B3)
 Tabelas:
   - fechamento_tickers (Fato: Cotações diárias/intraday de todas as ações da B3)
   - fechamento_ibov    (Fato: Pontos, máximas, mínimas e volume do Ibovespa)
@@ -38,7 +38,7 @@ logger = logging.getLogger("Atualizador_B3")
 # CONFIGURAÇÕES E VARIÁVEIS DE AMBIENTE
 # ==============================================================================
 GCP_SA_KEY = os.environ.get("GCP_SA_KEY")
-GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "project-1c5de651-f9e1-439e-854")
+GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "b3-brasil-bolsa-balcao")
 DATASET_ID = os.environ.get("DATASET_ID", "B3")
 
 LUNN_API_URL = os.environ.get("LUNN_API_URL")
@@ -84,7 +84,6 @@ def obter_cliente_bigquery():
 # ==============================================================================
 def extrair_cotacoes_b3(client: bigquery.Client) -> pd.DataFrame:
     """Extrai cotações da B3 via API LUNN, Supabase ou Yahoo Finance para todos os ativos."""
-    # 1. Tentar API LUNN
     if LUNN_API_URL:
         try:
             logger.info(f"Consultando API LUNN em: {LUNN_API_URL}...")
@@ -99,7 +98,6 @@ def extrair_cotacoes_b3(client: bigquery.Client) -> pd.DataFrame:
         except Exception as e:
             logger.warning(f"Falha ao consultar API LUNN: {e}")
 
-    # 2. Tentar Supabase intermediário
     if SUPABASE_URL and SUPABASE_KEY:
         try:
             logger.info(f"Buscando cotações no Supabase ({SUPABASE_URL})...")
@@ -118,7 +116,6 @@ def extrair_cotacoes_b3(client: bigquery.Client) -> pd.DataFrame:
         except Exception as e:
             logger.warning(f"Falha ao consultar Supabase: {e}")
 
-    # 3. Fallback: Extração paralela de todos os tickers cadastrados no BigQuery
     logger.info("Executando extração em lote para todos os tickers monitorados da B3...")
     return extrair_todos_tickers_yfinance(client)
 
@@ -126,7 +123,6 @@ def extrair_cotacoes_b3(client: bigquery.Client) -> pd.DataFrame:
 def extrair_todos_tickers_yfinance(client: bigquery.Client) -> pd.DataFrame:
     """Extrai cotações recentes de todos os 579+ tickers da B3 em paralelo."""
     try:
-        # Obter universo de tickers monitorados direto do BigQuery
         q_tickers = f"SELECT DISTINCT ticker FROM `{GCP_PROJECT_ID}.{DATASET_ID}.fechamento_tickers` WHERE ticker IS NOT NULL"
         df_t = client.query(q_tickers).to_dataframe()
         tickers = df_t["ticker"].dropna().unique().tolist()
@@ -330,16 +326,19 @@ def upsert_tabela_blindada(client: bigquery.Client, df_novos: pd.DataFrame, nome
         qtd_existente = 0
         df_consolidado = df_novos
 
-    # Desduplica mantendo sempre a versão mais recente
     df_consolidado = df_consolidado.drop_duplicates(subset=chaves, keep="last")
     qtd_consolidada = len(df_consolidado)
 
-    # TRAVA DE SEGURANÇA: Se a base consolidada tiver menos linhas que a existente, aborta para não perder dados!
     if qtd_existente > 0 and qtd_consolidada < qtd_existente:
         logger.error(f"❌ [TRAVA DE SEGURANÇA ACIONADA] Carga abortada: base consolidada ({qtd_consolidada}) menor que existente ({qtd_existente})!")
         return
 
     job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
+    if "data" in df_consolidado.columns:
+        job_config.time_partitioning = bigquery.TimePartitioning(type_=bigquery.TimePartitioningType.DAY, field="data")
+    if "ticker" in df_consolidado.columns:
+        job_config.clustering_fields = ["ticker"]
+
     logger.info(f"Carregando {qtd_consolidada} registros totais em '{tabela_destino}'...")
     client.load_table_from_dataframe(df_consolidado, tabela_destino, job_config=job_config).result()
     logger.info(f"✅ [SUCESSO] Tabela '{tabela_destino}' atualizada com sucesso ({qtd_consolidada} registros preservados).")
