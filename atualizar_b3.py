@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-ATUALIZADOR AUTOMÁTICO B3 - GOOGLE BIGQUERY (PADRÃO NÃO-PARTICIONADO)
+ATUALIZADOR AUTOMÁTICO B3 - GOOGLE BIGQUERY (PADRÃO NÃO-PARTICIONADO & ROBUSTO)
 ================================================================================
 Projeto: Pipeline de Dados B3 (Mercado Brasileiro) & Power BI
 Responsável: Karl Albert / Engenharia de Dados & BI
@@ -38,8 +38,9 @@ logger = logging.getLogger("Atualizador_B3")
 # CONFIGURAÇÕES E VARIÁVEIS DE AMBIENTE
 # ==============================================================================
 GCP_SA_KEY = os.environ.get("GCP_SA_KEY")
-GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "b3-brasil-bolsa-balcao")
-DATASET_ID = os.environ.get("DATASET_ID", "B3")
+RAW_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "b3-brasil-bolsa-balcao")
+GCP_PROJECT_ID = RAW_PROJECT_ID.strip() if RAW_PROJECT_ID else "b3-brasil-bolsa-balcao"
+DATASET_ID = os.environ.get("DATASET_ID", "B3").strip()
 
 LUNN_API_URL = os.environ.get("LUNN_API_URL")
 LUNN_API_KEY = os.environ.get("LUNN_API_KEY")
@@ -55,18 +56,22 @@ HEADERS_REQ = {
 # 1. CLIENTE BIGQUERY
 # ==============================================================================
 def obter_cliente_bigquery():
-    """Inicializa o cliente do Google BigQuery via Service Account ou ADC."""
+    """Inicializa o cliente do Google BigQuery via Service Account ou ADC de forma resiliente."""
+    global GCP_PROJECT_ID
     try:
         if GCP_SA_KEY:
             try:
-                sa_info = json.loads(GCP_SA_KEY)
+                sa_info = json.loads(GCP_SA_KEY.strip())
+                # Extrai o project_id diretamente da chave JSON se disponível
+                if "project_id" in sa_info and sa_info["project_id"]:
+                    GCP_PROJECT_ID = sa_info["project_id"].strip()
                 credentials = service_account.Credentials.from_service_account_info(sa_info)
                 client = bigquery.Client(project=GCP_PROJECT_ID, credentials=credentials)
                 logger.info(f"Conectado ao BigQuery com Service Account no projeto '{GCP_PROJECT_ID}'.")
                 return client
             except json.JSONDecodeError:
-                if os.path.exists(GCP_SA_KEY):
-                    credentials = service_account.Credentials.from_service_account_file(GCP_SA_KEY)
+                if os.path.exists(GCP_SA_KEY.strip()):
+                    credentials = service_account.Credentials.from_service_account_file(GCP_SA_KEY.strip())
                     client = bigquery.Client(project=GCP_PROJECT_ID, credentials=credentials)
                     logger.info(f"Conectado ao BigQuery via arquivo de credenciais no projeto '{GCP_PROJECT_ID}'.")
                     return client
