@@ -2,12 +2,12 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-ATUALIZADOR AUTOMÁTICO B3 - GOOGLE BIGQUERY (UNIVERSAL & MULTI-THREADED)
+ATUALIZADOR AUTOMÁTICO B3 - GOOGLE BIGQUERY (PADRÃO NÃO-PARTICIONADO)
 ================================================================================
 Projeto: Pipeline de Dados B3 (Mercado Brasileiro) & Power BI
 Responsável: Karl Albert / Engenharia de Dados & BI
 Destino: Google BigQuery (Projeto: b3-brasil-bolsa-balcao | Dataset: B3)
-Tabelas:
+Tabelas (Padrão Não-Particionadas):
   - fechamento_tickers (Fato: Cotações diárias/intraday de todas as ações da B3)
   - fechamento_ibov    (Fato: Pontos, máximas, mínimas e volume do Ibovespa)
   - fechamento_dolar   (Fato: Cotação USD/BRL PTAX / Fechamento)
@@ -293,15 +293,15 @@ def extrair_fechamento_dolar() -> pd.DataFrame:
 
 
 # ==============================================================================
-# 4. CARGA INCREMENTAL BLINDADA (PRESERVA 100% DO HISTÓRICO)
+# 4. CARGA INCREMENTAL BLINDADA (TABELA PADRÃO NÃO-PARTICIONADA)
 # ==============================================================================
 def upsert_tabela_blindada(client: bigquery.Client, df_novos: pd.DataFrame, nome_tabela: str, chaves: list):
     """
-    Carga incremental blindada:
-    1. Lê a base completa existente no BigQuery para garantir integridade.
+    Carga incremental blindada (Tabela padrão não-particionada):
+    1. Lê a base completa existente no BigQuery.
     2. Consolida com os novos registros e desduplica pelas chaves.
-    3. Valida se o total consolidado é maior ou igual ao histórico existente (trava de segurança).
-    4. Carrega os dados consolidados com segurança.
+    3. Trava de segurança: impede redução de volume de dados.
+    4. Grava em tabela padrão plana.
     """
     if df_novos is None or df_novos.empty:
         logger.info(f"Nenhum dado novo para a tabela '{nome_tabela}'.")
@@ -334,12 +334,7 @@ def upsert_tabela_blindada(client: bigquery.Client, df_novos: pd.DataFrame, nome
         return
 
     job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
-    if "data" in df_consolidado.columns:
-        job_config.time_partitioning = bigquery.TimePartitioning(type_=bigquery.TimePartitioningType.DAY, field="data")
-    if "ticker" in df_consolidado.columns:
-        job_config.clustering_fields = ["ticker"]
-
-    logger.info(f"Carregando {qtd_consolidada} registros totais em '{tabela_destino}'...")
+    logger.info(f"Carregando {qtd_consolidada} registros totais em '{tabela_destino}' (Padrão Não-Particionada)...")
     client.load_table_from_dataframe(df_consolidado, tabela_destino, job_config=job_config).result()
     logger.info(f"✅ [SUCESSO] Tabela '{tabela_destino}' atualizada com sucesso ({qtd_consolidada} registros preservados).")
 
