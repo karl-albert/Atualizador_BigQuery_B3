@@ -211,44 +211,46 @@ def extrair_fechamento_ibov() -> pd.DataFrame:
     except Exception as e:
         logger.warning(f"Não foi possível obter dados do IBOV: {e}")
     return pd.DataFrame()
-def extrair_fechamento_dolar() -> pd.DataFrame:
-    """Obtém cotações diárias do Dólar Comercial (USD/BRL) via AwesomeAPI."""
-    try:
-        url = "https://economia.awesomeapi.com.br/json/daily/USD-BRL/15"
-        logger.info(f"[DOLAR-DEBUG] Chamando AwesomeAPI: {url}")
-        resp = requests.get(url, timeout=30)
-        logger.info(f"[DOLAR-DEBUG] HTTP status: {resp.status_code}")
-        if resp.status_code == 200:
-            dados = resp.json()
-            logger.info(f"[DOLAR-DEBUG] Registros retornados pela API: {len(dados)}")
-            registros = []
-            for item in dados:
-                ts = int(item["timestamp"])
-                d_dt = datetime.fromtimestamp(ts).date()
-                compra = round(float(item["bid"]), 4)
-                venda = round(float(item["ask"]), 4)
-                maxima = round(float(item["high"]), 4)
-                minima = round(float(item["low"]), 4)
-                var = round(float(item["pctChange"]), 2)
-
-                registros.append({
-                    "data": d_dt,
-                    "compra": compra,
-                    "venda": venda,
-                    "maxima": maxima,
-                    "minima": minima,
-                    "variacao": var
-                })
-            df = pd.DataFrame(registros)
-            df["data"] = pd.to_datetime(df["data"]).dt.date
-            df = df.drop_duplicates(subset=["data"], keep="last")
-            logger.info(f"[DOLAR-DEBUG] Datas no DataFrame final: {sorted(df['data'].unique())}")
-            logger.info(f"[DOLAR-DEBUG] Total linhas após dedup: {len(df)}")
-            return df
-        else:
-            logger.error(f"[DOLAR-DEBUG] API retornou status {resp.status_code}: {resp.text[:200]}")
-    except Exception as e:
-        logger.warning(f"Não foi possível obter cotações do Dólar: {e}")
+def extrair_fechamento_dolar(max_tentativas: int = 3) -> pd.DataFrame:
+    """Obtém cotações diárias do Dólar Comercial (USD/BRL) via AwesomeAPI com retry."""
+    import time as _time
+    url = "https://economia.awesomeapi.com.br/json/daily/USD-BRL/15"
+    for tentativa in range(1, max_tentativas + 1):
+        try:
+            logger.info(f"[DOLAR] Chamando AwesomeAPI (tentativa {tentativa}/{max_tentativas})...")
+            resp = requests.get(url, timeout=30)
+            if resp.status_code == 200:
+                dados = resp.json()
+                logger.info(f"[DOLAR] API retornou {len(dados)} registros.")
+                registros = []
+                for item in dados:
+                    ts = int(item["timestamp"])
+                    d_dt = datetime.fromtimestamp(ts).date()
+                    registros.append({
+                        "data": d_dt,
+                        "compra": round(float(item["bid"]), 4),
+                        "venda": round(float(item["ask"]), 4),
+                        "maxima": round(float(item["high"]), 4),
+                        "minima": round(float(item["low"]), 4),
+                        "variacao": round(float(item["pctChange"]), 2)
+                    })
+                df = pd.DataFrame(registros)
+                df["data"] = pd.to_datetime(df["data"]).dt.date
+                df = df.drop_duplicates(subset=["data"], keep="last")
+                logger.info(f"[DOLAR] Datas extraídas: {sorted(df['data'].unique())}")
+                return df
+            elif resp.status_code == 429:
+                espera = 30 * tentativa
+                logger.warning(f"[DOLAR] Rate limit (429). Aguardando {espera}s antes de tentar novamente...")
+                _time.sleep(espera)
+            else:
+                logger.error(f"[DOLAR] API retornou status {resp.status_code}: {resp.text[:200]}")
+                break
+        except Exception as e:
+            logger.warning(f"[DOLAR] Erro na tentativa {tentativa}: {e}")
+            if tentativa < max_tentativas:
+                _time.sleep(10)
+    logger.error("[DOLAR] Todas as tentativas falharam. Nenhum dado de dólar obtido.")
     return pd.DataFrame()
 # ==============================================================================
 # 4. CARGA INCREMENTAL BLINDADA (TABELA PADRÃO NÃO-PARTICIONADA)
@@ -309,15 +311,15 @@ def main():
     logger.info(f"INICIANDO ROTINA DE ATUALIZAÇÃO B3 -> BIGQUERY [{datetime.now()}]")
     logger.info("=" * 70)
     client = obter_cliente_bigquery()
-    # 1. Atualizar Tickers da B3
-    df_tickers = extrair_cotacoes_b3(client)
-    upsert_tabela_blindada(client, df_tickers, "Fato_fechamento_tickers", chaves=["ticker", "data"])
+    # 1. Atualizar Dólar (primeiro, antes dos tickers que fazem muitas chamadas HTTP)
+    df_dolar = extrair_fechamento_dolar()
+    upsert_tabela_blindada(client, df_dolar, "Fato_fechamento_dolar", chaves=["data"])
     # 2. Atualizar Ibovespa
     df_ibov = extrair_fechamento_ibov()
     upsert_tabela_blindada(client, df_ibov, "Fato_fechamento_ibov", chaves=["data"])
-    # 3. Atualizar Dólar
-    df_dolar = extrair_fechamento_dolar()
-    upsert_tabela_blindada(client, df_dolar, "Fato_fechamento_dolar", chaves=["data"])
+    # 3. Atualizar Tickers da B3
+    df_tickers = extrair_cotacoes_b3(client)
+    upsert_tabela_blindada(client, df_tickers, "Fato_fechamento_tickers", chaves=["ticker", "data"])
     logger.info("=" * 70)
     logger.info("PIPELINE B3 FINALIZADO COM SUCESSO NO BIGQUERY!")
     logger.info("=" * 70)
