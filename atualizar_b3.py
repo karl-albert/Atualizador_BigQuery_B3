@@ -215,9 +215,12 @@ def extrair_fechamento_dolar() -> pd.DataFrame:
     """Obtém cotações diárias do Dólar Comercial (USD/BRL) via AwesomeAPI."""
     try:
         url = "https://economia.awesomeapi.com.br/json/daily/USD-BRL/15"
+        logger.info(f"[DOLAR-DEBUG] Chamando AwesomeAPI: {url}")
         resp = requests.get(url, timeout=30)
+        logger.info(f"[DOLAR-DEBUG] HTTP status: {resp.status_code}")
         if resp.status_code == 200:
             dados = resp.json()
+            logger.info(f"[DOLAR-DEBUG] Registros retornados pela API: {len(dados)}")
             registros = []
             for item in dados:
                 ts = int(item["timestamp"])
@@ -238,7 +241,12 @@ def extrair_fechamento_dolar() -> pd.DataFrame:
                 })
             df = pd.DataFrame(registros)
             df["data"] = pd.to_datetime(df["data"]).dt.date
-            return df.drop_duplicates(subset=["data"], keep="last")
+            df = df.drop_duplicates(subset=["data"], keep="last")
+            logger.info(f"[DOLAR-DEBUG] Datas no DataFrame final: {sorted(df['data'].unique())}")
+            logger.info(f"[DOLAR-DEBUG] Total linhas após dedup: {len(df)}")
+            return df
+        else:
+            logger.error(f"[DOLAR-DEBUG] API retornou status {resp.status_code}: {resp.text[:200]}")
     except Exception as e:
         logger.warning(f"Não foi possível obter cotações do Dólar: {e}")
     return pd.DataFrame()
@@ -257,6 +265,10 @@ def upsert_tabela_blindada(client: bigquery.Client, df_novos: pd.DataFrame, nome
         logger.info(f"Nenhum dado novo para a tabela '{nome_tabela}'.")
         return
     tabela_destino = f"{GCP_PROJECT_ID}.{DATASET_ID}.{nome_tabela}"
+    logger.info(f"[UPSERT-DEBUG] Destino: {tabela_destino}")
+    logger.info(f"[UPSERT-DEBUG] Novos registros: {len(df_novos)} | Colunas: {list(df_novos.columns)}")
+    if "data" in df_novos.columns:
+        logger.info(f"[UPSERT-DEBUG] Datas nos novos: {sorted(df_novos['data'].unique())[-5:]}")
 
     try:
         query = f"SELECT * FROM `{tabela_destino}`"
@@ -269,6 +281,9 @@ def upsert_tabela_blindada(client: bigquery.Client, df_novos: pd.DataFrame, nome
 
         qtd_existente = len(df_existente)
         logger.info(f"Lidos {qtd_existente} registros históricos existentes de '{tabela_destino}'.")
+        if "data" in df_existente.columns:
+            logger.info(f"[UPSERT-DEBUG] Última data existente: {df_existente['data'].max()}")
+            logger.info(f"[UPSERT-DEBUG] Colunas existentes: {list(df_existente.columns)}")
         df_consolidado = pd.concat([df_existente, df_novos], ignore_index=True)
     except Exception as e:
         logger.info(f"Tabela '{tabela_destino}' vazia ou nova: {e}")
@@ -276,6 +291,9 @@ def upsert_tabela_blindada(client: bigquery.Client, df_novos: pd.DataFrame, nome
         df_consolidado = df_novos
     df_consolidado = df_consolidado.drop_duplicates(subset=chaves, keep="last")
     qtd_consolidada = len(df_consolidado)
+    logger.info(f"[UPSERT-DEBUG] Após dedup: {qtd_consolidada} registros")
+    if "data" in df_consolidado.columns:
+        logger.info(f"[UPSERT-DEBUG] Última data consolidada: {df_consolidado['data'].max()}")
     if qtd_existente > 0 and qtd_consolidada < qtd_existente:
         logger.error(f"❌ [TRAVA DE SEGURANÇA ACIONADA] Carga abortada: base consolidada ({qtd_consolidada}) menor que existente ({qtd_existente})!")
         return
