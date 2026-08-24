@@ -8,13 +8,12 @@ Projeto: Pipeline de Dados B3 (Mercado Brasileiro) & Power BI
 Responsável: Karl Albert / Engenharia de Dados & BI
 Destino: Google BigQuery (Projeto: b3-brasil-bolsa-balcao | Dataset: B3)
 Tabelas (Padrão Não-Particionadas):
-  - fechamento_tickers (Fato: Cotações diárias/intraday de todas as ações da B3)
-  - fechamento_ibov    (Fato: Pontos, máximas, mínimas e volume do Ibovespa)
-  - fechamento_dolar   (Fato: Cotação USD/BRL PTAX / Fechamento)
-  - ativos_board       (Dimensão: Ativos monitorados, setores e status)
+  - Fato_fechamento_tickers (Fato: Cotações diárias/intraday de todas as ações da B3)
+  - Fato_fechamento_ibov    (Fato: Pontos, máximas, mínimas e volume do Ibovespa)
+  - Fato_fechamento_dolar   (Fato: Cotação USD/BRL PTAX / Fechamento)
+  - Din_ativos_board         (Dimensão: Ativos monitorados, setores e status)
 ================================================================================
 """
-
 import os
 import sys
 import json
@@ -25,7 +24,6 @@ import pandas as pd
 from google.cloud import bigquery
 from google.oauth2 import service_account
 from concurrent.futures import ThreadPoolExecutor
-
 # Configuração de Logging
 logging.basicConfig(
     level=logging.INFO,
@@ -33,7 +31,6 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 logger = logging.getLogger("Atualizador_B3")
-
 # ==============================================================================
 # CONFIGURAÇÕES E VARIÁVEIS DE AMBIENTE
 # ==============================================================================
@@ -41,17 +38,13 @@ GCP_SA_KEY = os.environ.get("GCP_SA_KEY")
 RAW_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "b3-brasil-bolsa-balcao")
 GCP_PROJECT_ID = RAW_PROJECT_ID.strip() if RAW_PROJECT_ID else "b3-brasil-bolsa-balcao"
 DATASET_ID = os.environ.get("DATASET_ID", "B3").strip()
-
 LUNN_API_URL = os.environ.get("LUNN_API_URL")
 LUNN_API_KEY = os.environ.get("LUNN_API_KEY")
-
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://qhehkgxbpmpptshxlwrb.supabase.co")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-
 HEADERS_REQ = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
-
 # ==============================================================================
 # 1. CLIENTE BIGQUERY
 # ==============================================================================
@@ -75,15 +68,13 @@ def obter_cliente_bigquery():
                     client = bigquery.Client(project=GCP_PROJECT_ID, credentials=credentials)
                     logger.info(f"Conectado ao BigQuery via arquivo de credenciais no projeto '{GCP_PROJECT_ID}'.")
                     return client
-        
+
         client = bigquery.Client(project=GCP_PROJECT_ID)
         logger.info(f"Conectado ao BigQuery via ADC no projeto '{GCP_PROJECT_ID}'.")
         return client
     except Exception as e:
         logger.error(f"Erro crítico ao inicializar cliente do BigQuery: {e}")
         raise e
-
-
 # ==============================================================================
 # 2. EXTRAÇÃO DE COTAÇÕES DE TODAS AS AÇÕES DA B3
 # ==============================================================================
@@ -102,7 +93,6 @@ def extrair_cotacoes_b3(client: bigquery.Client) -> pd.DataFrame:
                     return normalizar_df_tickers(df)
         except Exception as e:
             logger.warning(f"Falha ao consultar API LUNN: {e}")
-
     if SUPABASE_URL and SUPABASE_KEY:
         try:
             logger.info(f"Buscando cotações no Supabase ({SUPABASE_URL})...")
@@ -120,22 +110,18 @@ def extrair_cotacoes_b3(client: bigquery.Client) -> pd.DataFrame:
                     return normalizar_df_tickers(df)
         except Exception as e:
             logger.warning(f"Falha ao consultar Supabase: {e}")
-
     logger.info("Executando extração em lote para todos os tickers monitorados da B3...")
     return extrair_todos_tickers_yfinance(client)
-
-
 def extrair_todos_tickers_yfinance(client: bigquery.Client) -> pd.DataFrame:
     """Extrai cotações recentes de todos os 579+ tickers da B3 em paralelo."""
     try:
-        q_tickers = f"SELECT DISTINCT ticker FROM `{GCP_PROJECT_ID}.{DATASET_ID}.fechamento_tickers` WHERE ticker IS NOT NULL"
+        q_tickers = f"SELECT DISTINCT ticker FROM `{GCP_PROJECT_ID}.{DATASET_ID}.Fato_fechamento_tickers` WHERE ticker IS NOT NULL"
         df_t = client.query(q_tickers).to_dataframe()
         tickers = df_t["ticker"].dropna().unique().tolist()
         logger.info(f"Lista de {len(tickers)} ativos obtida do BigQuery para atualização.")
     except Exception as e:
         logger.warning(f"Erro ao obter lista de tickers do BigQuery: {e}. Usando lista base.")
         tickers = ["PETR4", "VALE3", "ITUB4", "BBDC4", "BBAS3", "ABEV3", "WEGE3", "RENT3", "SUZB3", "GGBR4"]
-
     def fetch_single_ticker(ticker):
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}.SA?range=10d&interval=1d"
         try:
@@ -147,13 +133,13 @@ def extrair_todos_tickers_yfinance(client: bigquery.Client) -> pd.DataFrame:
                     meta = result[0].get("meta", {})
                     reg_price = meta.get("regularMarketPrice")
                     prev_close = meta.get("chartPreviousClose") or meta.get("previousClose")
-                    
+
                     timestamps = result[0].get("timestamp", [])
                     quotes = result[0].get("indicators", {}).get("quote", [{}])[0]
                     closes = quotes.get("close", [])
                     opens = quotes.get("open", [])
                     volumes = quotes.get("volume", [])
-                    
+
                     rows = []
                     cutoff_date = date.today() - timedelta(days=7)
                     for ts, c, o, v in zip(timestamps, closes, opens, volumes):
@@ -179,18 +165,14 @@ def extrair_todos_tickers_yfinance(client: bigquery.Client) -> pd.DataFrame:
         except Exception:
             pass
         return []
-
     all_rows = []
     with ThreadPoolExecutor(max_workers=30) as executor:
         results = executor.map(fetch_single_ticker, tickers)
         for r in results:
             all_rows.extend(r)
-
     df = pd.DataFrame(all_rows)
     logger.info(f"Total de {len(df)} cotações coletadas para {df['ticker'].nunique() if not df.empty else 0} ativos.")
     return normalizar_df_tickers(df)
-
-
 def normalizar_df_tickers(df: pd.DataFrame) -> pd.DataFrame:
     """Padroniza tipos e colunas da tabela de tickers."""
     col_map = {
@@ -203,11 +185,10 @@ def normalizar_df_tickers(df: pd.DataFrame) -> pd.DataFrame:
         "Volume": "volume", "VOLUME": "volume"
     }
     df = df.rename(columns=col_map)
-    
+
     for col in ["ticker", "data", "preco", "variacao", "dy", "p_vp", "volume"]:
         if col not in df.columns:
             df[col] = None
-
     df["ticker"] = df["ticker"].astype(str).str.strip().str.upper()
     df["data"] = pd.to_datetime(df["data"]).dt.date
     df["preco"] = pd.to_numeric(df["preco"], errors="coerce")
@@ -215,12 +196,9 @@ def normalizar_df_tickers(df: pd.DataFrame) -> pd.DataFrame:
     df["dy"] = pd.to_numeric(df["dy"], errors="coerce").fillna(0.0)
     df["p_vp"] = pd.to_numeric(df["p_vp"], errors="coerce").fillna(0.0)
     df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0).astype("int64")
-
     df = df.dropna(subset=["ticker", "data"])
     df = df.drop_duplicates(subset=["ticker", "data"], keep="last")
     return df[["ticker", "data", "preco", "variacao", "dy", "p_vp", "volume"]]
-
-
 # ==============================================================================
 # 3. EXTRAÇÃO DO IBOVESPA E DÓLAR
 # ==============================================================================
@@ -235,7 +213,7 @@ def extrair_fechamento_ibov() -> pd.DataFrame:
             meta = result.get("meta", {})
             reg_price = meta.get("regularMarketPrice")
             prev_close = meta.get("chartPreviousClose")
-            
+
             timestamps = result.get("timestamp", [])
             quotes = result.get("indicators", {}).get("quote", [{}])[0]
             rows_ibov = []
@@ -262,8 +240,6 @@ def extrair_fechamento_ibov() -> pd.DataFrame:
     except Exception as e:
         logger.warning(f"Não foi possível obter dados do IBOV: {e}")
     return pd.DataFrame()
-
-
 def extrair_fechamento_dolar() -> pd.DataFrame:
     """Obtém cotações diárias do Dólar Comercial (USD/BRL) via AwesomeAPI."""
     try:
@@ -280,7 +256,7 @@ def extrair_fechamento_dolar() -> pd.DataFrame:
                 maxima = round(float(item["high"]), 4)
                 minima = round(float(item["low"]), 4)
                 var = round(float(item["pctChange"]), 2)
-                
+
                 registros.append({
                     "data": d_dt,
                     "compra": compra,
@@ -295,8 +271,6 @@ def extrair_fechamento_dolar() -> pd.DataFrame:
     except Exception as e:
         logger.warning(f"Não foi possível obter cotações do Dólar: {e}")
     return pd.DataFrame()
-
-
 # ==============================================================================
 # 4. CARGA INCREMENTAL BLINDADA (TABELA PADRÃO NÃO-PARTICIONADA)
 # ==============================================================================
@@ -311,18 +285,17 @@ def upsert_tabela_blindada(client: bigquery.Client, df_novos: pd.DataFrame, nome
     if df_novos is None or df_novos.empty:
         logger.info(f"Nenhum dado novo para a tabela '{nome_tabela}'.")
         return
-
     tabela_destino = f"{GCP_PROJECT_ID}.{DATASET_ID}.{nome_tabela}"
-    
+
     try:
         query = f"SELECT * FROM `{tabela_destino}`"
         df_existente = client.query(query).to_dataframe()
-        
+
         if "data" in df_existente.columns:
             df_existente["data"] = pd.to_datetime(df_existente["data"]).dt.date
         if "volume" in df_existente.columns:
             df_existente["volume"] = pd.to_numeric(df_existente["volume"], errors="coerce").fillna(0).astype("int64")
-            
+
         qtd_existente = len(df_existente)
         logger.info(f"Lidos {qtd_existente} registros históricos existentes de '{tabela_destino}'.")
         df_consolidado = pd.concat([df_existente, df_novos], ignore_index=True)
@@ -330,20 +303,15 @@ def upsert_tabela_blindada(client: bigquery.Client, df_novos: pd.DataFrame, nome
         logger.info(f"Tabela '{tabela_destino}' vazia ou nova: {e}")
         qtd_existente = 0
         df_consolidado = df_novos
-
     df_consolidado = df_consolidado.drop_duplicates(subset=chaves, keep="last")
     qtd_consolidada = len(df_consolidado)
-
     if qtd_existente > 0 and qtd_consolidada < qtd_existente:
         logger.error(f"❌ [TRAVA DE SEGURANÇA ACIONADA] Carga abortada: base consolidada ({qtd_consolidada}) menor que existente ({qtd_existente})!")
         return
-
     job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
     logger.info(f"Carregando {qtd_consolidada} registros totais em '{tabela_destino}' (Padrão Não-Particionada)...")
     client.load_table_from_dataframe(df_consolidado, tabela_destino, job_config=job_config).result()
     logger.info(f"✅ [SUCESSO] Tabela '{tabela_destino}' atualizada com sucesso ({qtd_consolidada} registros preservados).")
-
-
 # ==============================================================================
 # 5. EXECUÇÃO PRINCIPAL
 # ==============================================================================
@@ -351,25 +319,18 @@ def main():
     logger.info("=" * 70)
     logger.info(f"INICIANDO ROTINA DE ATUALIZAÇÃO B3 -> BIGQUERY [{datetime.now()}]")
     logger.info("=" * 70)
-
     client = obter_cliente_bigquery()
-
     # 1. Atualizar Tickers da B3
     df_tickers = extrair_cotacoes_b3(client)
-    upsert_tabela_blindada(client, df_tickers, "fechamento_tickers", chaves=["ticker", "data"])
-
+    upsert_tabela_blindada(client, df_tickers, "Fato_fechamento_tickers", chaves=["ticker", "data"])
     # 2. Atualizar Ibovespa
     df_ibov = extrair_fechamento_ibov()
-    upsert_tabela_blindada(client, df_ibov, "fechamento_ibov", chaves=["data"])
-
+    upsert_tabela_blindada(client, df_ibov, "Fato_fechamento_ibov", chaves=["data"])
     # 3. Atualizar Dólar
     df_dolar = extrair_fechamento_dolar()
-    upsert_tabela_blindada(client, df_dolar, "fechamento_dolar", chaves=["data"])
-
+    upsert_tabela_blindada(client, df_dolar, "Fato_fechamento_dolar", chaves=["data"])
     logger.info("=" * 70)
     logger.info("PIPELINE B3 FINALIZADO COM SUCESSO NO BIGQUERY!")
     logger.info("=" * 70)
-
-
 if __name__ == "__main__":
     main()
