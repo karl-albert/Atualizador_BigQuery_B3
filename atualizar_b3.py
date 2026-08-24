@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-ATUALIZADOR AUTOMÁTICO B3 - GOOGLE BIGQUERY (PADRÃO NÃO-PARTICIONADO & ROBUSTO)
+ATUALIZADOR AUTOMÁTICO B3 - GOOGLE BIGQUERY (PADRÃO NÃO-PARTICIONADO & ROBUSTO) revisado em 24/08 19:30
 ================================================================================
 Projeto: Pipeline de Dados B3 (Mercado Brasileiro) & Power BI
-Responsável: Karl Albert / Engenharia de Dados & BI
+Responsável: Karl Albert / Engenharia de Dados & BI 
 Destino: Google BigQuery (Projeto: b3-brasil-bolsa-balcao | Dataset: B3)
 Tabelas (Padrão Não-Particionadas):
   - Fato_fechamento_tickers (Fato: Cotações diárias/intraday de todas as ações da B3)
