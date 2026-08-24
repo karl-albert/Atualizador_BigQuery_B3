@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-ATUALIZADOR AUTOMÁTICO B3 - GOOGLE BIGQUERY (PADRÃO NÃO-PARTICIONADO & ROBUSTO) revisado em 24/08 19:30
+ATUALIZADOR AUTOMÁTICO B3 - GOOGLE BIGQUERY (PADRÃO NÃO-PARTICIONADO & ROBUSTO)
 ================================================================================
 Projeto: Pipeline de Dados B3 (Mercado Brasileiro) & Power BI
-Responsável: Karl Albert / Engenharia de Dados & BI 
+Responsável: Karl Albert / Engenharia de Dados & BI
 Destino: Google BigQuery (Projeto: b3-brasil-bolsa-balcao | Dataset: B3)
 Tabelas (Padrão Não-Particionadas):
   - Fato_fechamento_tickers (Fato: Cotações diárias/intraday de todas as ações da B3)
@@ -15,7 +15,6 @@ Tabelas (Padrão Não-Particionadas):
 ================================================================================
 """
 import os
-import sys
 import json
 import logging
 from datetime import datetime, date, timedelta
@@ -35,13 +34,8 @@ logger = logging.getLogger("Atualizador_B3")
 # CONFIGURAÇÕES E VARIÁVEIS DE AMBIENTE
 # ==============================================================================
 GCP_SA_KEY = os.environ.get("GCP_SA_KEY")
-RAW_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "b3-brasil-bolsa-balcao")
-GCP_PROJECT_ID = RAW_PROJECT_ID.strip() if RAW_PROJECT_ID else "b3-brasil-bolsa-balcao"
+GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "b3-brasil-bolsa-balcao").strip()
 DATASET_ID = os.environ.get("DATASET_ID", "B3").strip()
-LUNN_API_URL = os.environ.get("LUNN_API_URL")
-LUNN_API_KEY = os.environ.get("LUNN_API_KEY")
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://qhehkgxbpmpptshxlwrb.supabase.co")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 HEADERS_REQ = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
@@ -50,14 +44,21 @@ HEADERS_REQ = {
 # ==============================================================================
 def obter_cliente_bigquery():
     """Inicializa o cliente do Google BigQuery via Service Account ou ADC de forma resiliente."""
-    global GCP_PROJECT_ID
     try:
         if GCP_SA_KEY:
             try:
                 sa_info = json.loads(GCP_SA_KEY.strip())
-                # Extrai o project_id diretamente da chave JSON se disponível
-                if "project_id" in sa_info and sa_info["project_id"]:
-                    GCP_PROJECT_ID = sa_info["project_id"].strip()
+                # IMPORTANTE: NÃO sobrescrever GCP_PROJECT_ID com o project_id
+                # da chave JSON. A service account pode pertencer a um projeto
+                # diferente do projeto de destino dos dados. O destino é sempre
+                # controlado pela env GCP_PROJECT_ID ou pelo default hardcoded.
+                sa_project = sa_info.get("project_id", "")
+                if sa_project and sa_project.strip() != GCP_PROJECT_ID:
+                    logger.warning(
+                        f"SA pertence ao projeto '{sa_project.strip()}', "
+                        f"mas o destino dos dados é '{GCP_PROJECT_ID}'. "
+                        f"Usando '{GCP_PROJECT_ID}' como projeto de destino."
+                    )
                 credentials = service_account.Credentials.from_service_account_info(sa_info)
                 client = bigquery.Client(project=GCP_PROJECT_ID, credentials=credentials)
                 logger.info(f"Conectado ao BigQuery com Service Account no projeto '{GCP_PROJECT_ID}'.")
@@ -79,37 +80,7 @@ def obter_cliente_bigquery():
 # 2. EXTRAÇÃO DE COTAÇÕES DE TODAS AS AÇÕES DA B3
 # ==============================================================================
 def extrair_cotacoes_b3(client: bigquery.Client) -> pd.DataFrame:
-    """Extrai cotações da B3 via API LUNN, Supabase ou Yahoo Finance para todos os ativos."""
-    if LUNN_API_URL:
-        try:
-            logger.info(f"Consultando API LUNN em: {LUNN_API_URL}...")
-            headers = {"Authorization": f"Bearer {LUNN_API_KEY}"} if LUNN_API_KEY else {}
-            resp = requests.get(LUNN_API_URL, headers=headers, timeout=60)
-            if resp.status_code == 200:
-                dados = resp.json()
-                df = pd.DataFrame(dados)
-                if not df.empty:
-                    logger.info(f"Sucesso na API LUNN: {len(df)} cotações obtidas.")
-                    return normalizar_df_tickers(df)
-        except Exception as e:
-            logger.warning(f"Falha ao consultar API LUNN: {e}")
-    if SUPABASE_URL and SUPABASE_KEY:
-        try:
-            logger.info(f"Buscando cotações no Supabase ({SUPABASE_URL})...")
-            url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/fechamento_tickers?select=*&order=data.desc&limit=10000"
-            headers = {
-                "apikey": SUPABASE_KEY,
-                "Authorization": f"Bearer {SUPABASE_KEY}"
-            }
-            resp = requests.get(url, headers=headers, timeout=60)
-            if resp.status_code == 200:
-                dados = resp.json()
-                df = pd.DataFrame(dados)
-                if not df.empty:
-                    logger.info(f"Sucesso no Supabase: {len(df)} cotações obtidas.")
-                    return normalizar_df_tickers(df)
-        except Exception as e:
-            logger.warning(f"Falha ao consultar Supabase: {e}")
+    """Extrai cotações da B3 via Yahoo Finance para todos os ativos monitorados."""
     logger.info("Executando extração em lote para todos os tickers monitorados da B3...")
     return extrair_todos_tickers_yfinance(client)
 def extrair_todos_tickers_yfinance(client: bigquery.Client) -> pd.DataFrame:
