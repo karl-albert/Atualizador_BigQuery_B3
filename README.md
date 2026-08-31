@@ -17,10 +17,10 @@ Repositório automatizado para extração, tratamento e carga incremental de cot
        │
        ▼
 [SQL MERGE no Google BigQuery (Dataset: B3)]
-  ├── `fechamento_tickers` (Particionada por Data e Clusterizada por Ticker)
-  ├── `fechamento_ibov`    (Histórico de Pontos e Volume do Ibovespa)
-  ├── `fechamento_dolar`   (Cotação de Compra, Venda e PTAX USD/BRL)
-  └── `ativos_board`       (Tabela Mestra de Ativos e Setores)
+  ├── `Fato_B3_tickers` (Cotações, DY, P/VP e Volume dos 110 Ativos)
+  ├── `Fato_B3_ibov`    (Histórico de Pontos e Volume do Ibovespa)
+  ├── `Fato_B3_dolar`   (Cotação de Compra, Venda e PTAX USD/BRL)
+  └── `Dim_Ativos_Board` (Tabela Mestra de Ativos e Setores)
        │
        ▼
 [Power BI Desktop & Power BI Service (Refresh sem Gateway)]

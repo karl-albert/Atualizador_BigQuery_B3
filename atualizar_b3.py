@@ -14,15 +14,18 @@ Tabelas (Padrão Não-Particionadas):
   - Din_ativos_board         (Dimensão: Ativos monitorados, setores e status)
 ================================================================================
 """
+
 import os
 import json
+import time
 import logging
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 import requests
 import pandas as pd
 from google.cloud import bigquery
 from google.oauth2 import service_account
 from concurrent.futures import ThreadPoolExecutor
+
 # Configuração de Logging
 logging.basicConfig(
     level=logging.INFO,
@@ -30,15 +33,28 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 logger = logging.getLogger("Atualizador_B3")
+
 # ==============================================================================
 # CONFIGURAÇÕES E VARIÁVEIS DE AMBIENTE
 # ==============================================================================
 GCP_SA_KEY = os.environ.get("GCP_SA_KEY")
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "b3-brasil-bolsa-balcao").strip()
 DATASET_ID = os.environ.get("DATASET_ID", "B3").strip()
+
+LUNN_API_URL = os.environ.get("LUNN_API_URL")
+LUNN_API_KEY = os.environ.get("LUNN_API_KEY")
+
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://qhehkgxbpmpptshxlwrb.supabase.co")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+
 HEADERS_REQ = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
+
+# Configuração de Fuso Horário de Brasília
+TZ_BSB = timezone(timedelta(hours=-3))
+
+
 # ==============================================================================
 # 1. CLIENTE BIGQUERY
 # ==============================================================================
@@ -50,8 +66,7 @@ def obter_cliente_bigquery():
                 sa_info = json.loads(GCP_SA_KEY.strip())
                 # IMPORTANTE: NÃO sobrescrever GCP_PROJECT_ID com o project_id
                 # da chave JSON. A service account pode pertencer a um projeto
-                # diferente do projeto de destino dos dados. O destino é sempre
-                # controlado pela env GCP_PROJECT_ID ou pelo default hardcoded.
+                # diferente do projeto de destino dos dados.
                 sa_project = sa_info.get("project_id", "")
                 if sa_project and sa_project.strip() != GCP_PROJECT_ID:
                     logger.warning(
@@ -76,15 +91,63 @@ def obter_cliente_bigquery():
     except Exception as e:
         logger.error(f"Erro crítico ao inicializar cliente do BigQuery: {e}")
         raise e
+
+
 # ==============================================================================
 # 2. EXTRAÇÃO DE COTAÇÕES DE TODAS AS AÇÕES DA B3
 # ==============================================================================
 def extrair_cotacoes_b3(client: bigquery.Client) -> pd.DataFrame:
-    """Extrai cotações da B3 via Yahoo Finance para todos os ativos monitorados."""
-    logger.info("Executando extração em lote para todos os tickers monitorados da B3...")
-    return extrair_todos_tickers_yfinance(client)
+    """Extrai cotações da B3 via Yahoo Finance (com suporte a Intraday e Fechamento) ou LUNN/Supabase."""
+    agora_bsb = datetime.now(TZ_BSB)
+    eh_intraday = (agora_bsb.hour < 18) and (agora_bsb.weekday() < 5)
+    logger.info(f"Modo de Extração: {'INTRADAY (Tempo Real)' if eh_intraday else 'FECHAMENTO CONSOLIDADO'} [{agora_bsb.strftime('%Y-%m-%d %H:%M:%S')}]")
+
+    # Yahoo Finance como motor principal de alta performance em tempo real
+    try:
+        logger.info("Executando extração em lote para todos os tickers monitorados da B3...")
+        df_yf = extrair_todos_tickers_yfinance(client)
+        if df_yf is not None and not df_yf.empty:
+            return df_yf
+    except Exception as e:
+        logger.warning(f"Falha na extração Yahoo Finance: {e}")
+
+    if LUNN_API_URL:
+        try:
+            logger.info(f"Consultando API LUNN em: {LUNN_API_URL}...")
+            headers = {"Authorization": f"Bearer {LUNN_API_KEY}"} if LUNN_API_KEY else {}
+            resp = requests.get(LUNN_API_URL, headers=headers, timeout=60)
+            if resp.status_code == 200:
+                dados = resp.json()
+                df = pd.DataFrame(dados)
+                if not df.empty:
+                    logger.info(f"Sucesso na API LUNN: {len(df)} cotações obtidas.")
+                    return normalizar_df_tickers(df)
+        except Exception as e:
+            logger.warning(f"Falha ao consultar API LUNN: {e}")
+
+    if SUPABASE_URL and SUPABASE_KEY:
+        try:
+            logger.info(f"Buscando cotações no Supabase ({SUPABASE_URL})...")
+            url = f"{SUPABASE_URL.rstrip('/')}/rest/v1/fechamento_tickers?select=*&order=data.desc&limit=10000"
+            headers = {
+                "apikey": SUPABASE_KEY,
+                "Authorization": f"Bearer {SUPABASE_KEY}"
+            }
+            resp = requests.get(url, headers=headers, timeout=60)
+            if resp.status_code == 200:
+                dados = resp.json()
+                df = pd.DataFrame(dados)
+                if not df.empty:
+                    logger.info(f"Sucesso no Supabase: {len(df)} cotações obtidas.")
+                    return normalizar_df_tickers(df)
+        except Exception as e:
+            logger.warning(f"Falha ao consultar Supabase: {e}")
+
+    return pd.DataFrame()
+
+
 def extrair_todos_tickers_yfinance(client: bigquery.Client) -> pd.DataFrame:
-    """Extrai cotações recentes de todos os 579+ tickers da B3 em paralelo."""
+    """Extrai cotações de todos os tickers da B3 com suporte a Intraday (Tempo Real) e Histórico."""
     try:
         q_tickers = f"SELECT DISTINCT ticker FROM `{GCP_PROJECT_ID}.{DATASET_ID}.Fato_fechamento_tickers` WHERE ticker IS NOT NULL"
         df_t = client.query(q_tickers).to_dataframe()
@@ -93,6 +156,11 @@ def extrair_todos_tickers_yfinance(client: bigquery.Client) -> pd.DataFrame:
     except Exception as e:
         logger.warning(f"Erro ao obter lista de tickers do BigQuery: {e}. Usando lista base.")
         tickers = ["PETR4", "VALE3", "ITUB4", "BBDC4", "BBAS3", "ABEV3", "WEGE3", "RENT3", "SUZB3", "GGBR4"]
+
+    hoje_dt = datetime.now(TZ_BSB).date()
+    cutoff_date = hoje_dt - timedelta(days=7)
+    eh_dia_util = datetime.now(TZ_BSB).weekday() < 5
+
     def fetch_single_ticker(ticker):
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}.SA?range=10d&interval=1d"
         try:
@@ -104,24 +172,23 @@ def extrair_todos_tickers_yfinance(client: bigquery.Client) -> pd.DataFrame:
                     meta = result[0].get("meta", {})
                     reg_price = meta.get("regularMarketPrice")
                     prev_close = meta.get("chartPreviousClose") or meta.get("previousClose")
+                    reg_vol = meta.get("regularMarketVolume")
 
                     timestamps = result[0].get("timestamp", [])
                     quotes = result[0].get("indicators", {}).get("quote", [{}])[0]
                     closes = quotes.get("close", [])
-                    opens = quotes.get("open", [])
                     volumes = quotes.get("volume", [])
 
                     rows = []
-                    cutoff_date = date.today() - timedelta(days=7)
-                    for ts, c, o, v in zip(timestamps, closes, opens, volumes):
-                        d_dt = datetime.fromtimestamp(ts).date()
-                        if d_dt >= cutoff_date:
-                            preco_final = c if c is not None else reg_price
-                            if preco_final is not None:
-                                preco = round(float(preco_final), 2)
-                                open_p = float(o) if o is not None else (prev_close if prev_close else preco)
-                                base_var = prev_close if prev_close else open_p
-                                var = round(((preco - base_var) / base_var) * 100, 2) if base_var and base_var > 0 else 0.0
+                    # 1. Velas históricas anteriores a hoje
+                    for i, (ts, c, v) in enumerate(zip(timestamps, closes, volumes)):
+                        d_dt = datetime.fromtimestamp(ts, tz=TZ_BSB).date()
+                        # Ignora fins de semana e data de hoje (hoje é processado via meta)
+                        if d_dt >= cutoff_date and d_dt < hoje_dt and d_dt.weekday() < 5:
+                            if c is not None:
+                                preco = round(float(c), 2)
+                                c_ant = closes[i-1] if i > 0 and closes[i-1] else (prev_close if prev_close else preco)
+                                var = round(((preco - c_ant) / c_ant) * 100, 2) if c_ant and c_ant > 0 else 0.0
                                 vol = int(v) if v is not None else 0
                                 rows.append({
                                     "ticker": ticker,
@@ -132,18 +199,38 @@ def extrair_todos_tickers_yfinance(client: bigquery.Client) -> pd.DataFrame:
                                     "p_vp": 0.0,
                                     "volume": vol
                                 })
+
+                    # 2. Posição Intraday / Fechamento de Hoje
+                    if eh_dia_util and reg_price is not None:
+                        preco_hoje = round(float(reg_price), 2)
+                        base_d1 = prev_close if prev_close else (closes[-1] if closes and closes[-1] else preco_hoje)
+                        var_hoje = round(((preco_hoje - base_d1) / base_d1) * 100, 2) if base_d1 and base_d1 > 0 else 0.0
+                        vol_hoje = int(reg_vol) if reg_vol is not None else (int(volumes[-1]) if volumes and volumes[-1] else 0)
+                        rows.append({
+                            "ticker": ticker,
+                            "data": hoje_dt,
+                            "preco": preco_hoje,
+                            "variacao": var_hoje,
+                            "dy": 0.0,
+                            "p_vp": 0.0,
+                            "volume": vol_hoje
+                        })
                     return rows
         except Exception:
             pass
         return []
+
     all_rows = []
     with ThreadPoolExecutor(max_workers=30) as executor:
         results = executor.map(fetch_single_ticker, tickers)
         for r in results:
             all_rows.extend(r)
+
     df = pd.DataFrame(all_rows)
     logger.info(f"Total de {len(df)} cotações coletadas para {df['ticker'].nunique() if not df.empty else 0} ativos.")
     return normalizar_df_tickers(df)
+
+
 def normalizar_df_tickers(df: pd.DataFrame) -> pd.DataFrame:
     """Padroniza tipos e colunas da tabela de tickers."""
     col_map = {
@@ -160,6 +247,7 @@ def normalizar_df_tickers(df: pd.DataFrame) -> pd.DataFrame:
     for col in ["ticker", "data", "preco", "variacao", "dy", "p_vp", "volume"]:
         if col not in df.columns:
             df[col] = None
+
     df["ticker"] = df["ticker"].astype(str).str.strip().str.upper()
     df["data"] = pd.to_datetime(df["data"]).dt.date
     df["preco"] = pd.to_numeric(df["preco"], errors="coerce")
@@ -167,14 +255,19 @@ def normalizar_df_tickers(df: pd.DataFrame) -> pd.DataFrame:
     df["dy"] = pd.to_numeric(df["dy"], errors="coerce").fillna(0.0)
     df["p_vp"] = pd.to_numeric(df["p_vp"], errors="coerce").fillna(0.0)
     df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0).astype("int64")
+
+    # Remove finais de semana e nulos
     df = df.dropna(subset=["ticker", "data"])
+    df = df[pd.to_datetime(df["data"]).dt.weekday < 5]
     df = df.drop_duplicates(subset=["ticker", "data"], keep="last")
     return df[["ticker", "data", "preco", "variacao", "dy", "p_vp", "volume"]]
+
+
 # ==============================================================================
 # 3. EXTRAÇÃO DO IBOVESPA E DÓLAR
 # ==============================================================================
 def extrair_fechamento_ibov() -> pd.DataFrame:
-    """Obtém os últimos pontos e volume do Ibovespa."""
+    """Obtém os últimos pontos e volume do Ibovespa (Intraday e Histórico)."""
     try:
         url_ibov = "https://query1.finance.yahoo.com/v8/finance/chart/%5EBVSP?range=10d&interval=1d"
         r_ibov = requests.get(url_ibov, headers=HEADERS_REQ, timeout=10)
@@ -183,75 +276,124 @@ def extrair_fechamento_ibov() -> pd.DataFrame:
             result = res.get("chart", {}).get("result", [])[0]
             meta = result.get("meta", {})
             reg_price = meta.get("regularMarketPrice")
-            prev_close = meta.get("chartPreviousClose")
+            prev_close = meta.get("chartPreviousClose") or meta.get("previousClose")
+            reg_vol = meta.get("regularMarketVolume", 0)
 
             timestamps = result.get("timestamp", [])
             quotes = result.get("indicators", {}).get("quote", [{}])[0]
+            closes = quotes.get("close", [])
+            opens = quotes.get("open", [])
+            highs = quotes.get("high", [])
+            lows = quotes.get("low", [])
+            volumes = quotes.get("volume", [])
+
+            hoje_dt = datetime.now(TZ_BSB).date()
+            cutoff_date = hoje_dt - timedelta(days=10)
             rows_ibov = []
-            cutoff_date = date.today() - timedelta(days=7)
-            for ts, c, o, h, l, v in zip(timestamps, quotes.get("close", []), quotes.get("open", []), quotes.get("high", []), quotes.get("low", []), quotes.get("volume", [])):
-                d_dt = datetime.fromtimestamp(ts).date()
-                if d_dt >= cutoff_date:
-                    fech_raw = c if c is not None else reg_price
-                    if fech_raw:
-                        fech = round(float(fech_raw), 2)
-                        abert = round(float(o), 2) if o else (prev_close if prev_close else fech)
+
+            # Histórico
+            for i, (ts, c, o, h, l, v) in enumerate(zip(timestamps, closes, opens, highs, lows, volumes)):
+                d_dt = datetime.fromtimestamp(ts, tz=TZ_BSB).date()
+                if d_dt >= cutoff_date and d_dt < hoje_dt and d_dt.weekday() < 5:
+                    if c is not None:
+                        fech = round(float(c), 2)
+                        abert = round(float(o), 2) if o else fech
                         maxi = round(float(h), 2) if h else fech
                         mini = round(float(l), 2) if l else fech
-                        var = round(((fech - prev_close) / prev_close) * 100, 2) if prev_close else 0.0
+                        c_ant = closes[i-1] if i > 0 and closes[i-1] else (prev_close if prev_close else abert)
+                        var = round(((fech - c_ant) / c_ant) * 100, 2) if c_ant else 0.0
                         vol = int(v) if v else 0
                         rows_ibov.append({
                             "data": d_dt, "abertura": abert, "maxima": maxi, "minima": mini,
                             "fechamento": fech, "ultimo": fech, "variacao": var, "volume": vol
                         })
+
+            # Intraday Hoje
+            if datetime.now(TZ_BSB).weekday() < 5 and reg_price is not None:
+                fech_hoje = round(float(reg_price), 2)
+                base_ibov = prev_close if prev_close else (closes[-1] if closes and closes[-1] else fech_hoje)
+                var_hoje = round(((fech_hoje - base_ibov) / base_ibov) * 100, 2) if base_ibov else 0.0
+                rows_ibov.append({
+                    "data": hoje_dt, "abertura": fech_hoje, "maxima": fech_hoje, "minima": fech_hoje,
+                    "fechamento": fech_hoje, "ultimo": fech_hoje, "variacao": var_hoje,
+                    "volume": int(reg_vol) if reg_vol else 0
+                })
+
             if rows_ibov:
                 df = pd.DataFrame(rows_ibov)
                 df["data"] = pd.to_datetime(df["data"]).dt.date
+                df = df[pd.to_datetime(df["data"]).dt.weekday < 5]
                 return df.drop_duplicates(subset=["data"], keep="last")
     except Exception as e:
         logger.warning(f"Não foi possível obter dados do IBOV: {e}")
     return pd.DataFrame()
+
+
 def extrair_fechamento_dolar(max_tentativas: int = 3) -> pd.DataFrame:
-    """Obtém cotações diárias do Dólar Comercial (USD/BRL) via AwesomeAPI com retry."""
-    import time as _time
-    url = "https://economia.awesomeapi.com.br/json/daily/USD-BRL/15"
+    """Obtém cotações do Dólar Comercial (USD/BRL) via AwesomeAPI (Histórico e Intraday com retry)."""
+    registros = []
+    hoje_dt = datetime.now(TZ_BSB).date()
+
+    # 1. Histórico dos últimos 15 dias úteis com retry
+    url_hist = "https://economia.awesomeapi.com.br/json/daily/USD-BRL/15"
     for tentativa in range(1, max_tentativas + 1):
         try:
-            logger.info(f"[DOLAR] Chamando AwesomeAPI (tentativa {tentativa}/{max_tentativas})...")
-            resp = requests.get(url, timeout=30)
+            logger.info(f"[DOLAR] Chamando AwesomeAPI Histórico (tentativa {tentativa}/{max_tentativas})...")
+            resp = requests.get(url_hist, headers=HEADERS_REQ, timeout=20)
             if resp.status_code == 200:
                 dados = resp.json()
-                logger.info(f"[DOLAR] API retornou {len(dados)} registros.")
-                registros = []
+                logger.info(f"[DOLAR] API histórico retornou {len(dados)} registros.")
                 for item in dados:
                     ts = int(item["timestamp"])
-                    d_dt = datetime.fromtimestamp(ts).date()
-                    registros.append({
-                        "data": d_dt,
-                        "compra": round(float(item["bid"]), 4),
-                        "venda": round(float(item["ask"]), 4),
-                        "maxima": round(float(item["high"]), 4),
-                        "minima": round(float(item["low"]), 4),
-                        "variacao": round(float(item["pctChange"]), 2)
-                    })
-                df = pd.DataFrame(registros)
-                df["data"] = pd.to_datetime(df["data"]).dt.date
-                df = df.drop_duplicates(subset=["data"], keep="last")
-                logger.info(f"[DOLAR] Datas extraídas: {sorted(df['data'].unique())}")
-                return df
+                    d_dt = datetime.fromtimestamp(ts, tz=TZ_BSB).date()
+                    if d_dt.weekday() < 5:
+                        registros.append({
+                            "data": d_dt,
+                            "compra": round(float(item["bid"]), 4),
+                            "venda": round(float(item["ask"]), 4),
+                            "maxima": round(float(item["high"]), 4),
+                            "minima": round(float(item["low"]), 4),
+                            "variacao": round(float(item["pctChange"]), 2)
+                        })
+                break
             elif resp.status_code == 429:
-                espera = 30 * tentativa
-                logger.warning(f"[DOLAR] Rate limit (429). Aguardando {espera}s antes de tentar novamente...")
-                _time.sleep(espera)
+                espera = 15 * tentativa
+                logger.warning(f"[DOLAR] Rate limit (429). Aguardando {espera}s...")
+                time.sleep(espera)
             else:
-                logger.error(f"[DOLAR] API retornou status {resp.status_code}: {resp.text[:200]}")
+                logger.error(f"[DOLAR] Status {resp.status_code}: {resp.text[:200]}")
                 break
         except Exception as e:
             logger.warning(f"[DOLAR] Erro na tentativa {tentativa}: {e}")
             if tentativa < max_tentativas:
-                _time.sleep(10)
-    logger.error("[DOLAR] Todas as tentativas falharam. Nenhum dado de dólar obtido.")
+                time.sleep(5)
+
+    # 2. Intraday em tempo real
+    try:
+        url_last = "https://economia.awesomeapi.com.br/last/USD-BRL"
+        resp_last = requests.get(url_last, headers=HEADERS_REQ, timeout=15)
+        if resp_last.status_code == 200:
+            item = resp_last.json().get("USDBRL", {})
+            if item and datetime.now(TZ_BSB).weekday() < 5:
+                registros.append({
+                    "data": hoje_dt,
+                    "compra": round(float(item["bid"]), 4),
+                    "venda": round(float(item["ask"]), 4),
+                    "maxima": round(float(item["high"]), 4),
+                    "minima": round(float(item["low"]), 4),
+                    "variacao": round(float(item["pctChange"]), 2)
+                })
+    except Exception as e:
+        logger.warning(f"Não foi possível obter cotação live do Dólar: {e}")
+
+    if registros:
+        df = pd.DataFrame(registros)
+        df["data"] = pd.to_datetime(df["data"]).dt.date
+        df = df[pd.to_datetime(df["data"]).dt.weekday < 5]
+        return df.drop_duplicates(subset=["data"], keep="last")
     return pd.DataFrame()
+
+
 # ==============================================================================
 # 4. CARGA INCREMENTAL BLINDADA (TABELA PADRÃO NÃO-PARTICIONADA)
 # ==============================================================================
@@ -266,11 +408,16 @@ def upsert_tabela_blindada(client: bigquery.Client, df_novos: pd.DataFrame, nome
     if df_novos is None or df_novos.empty:
         logger.info(f"Nenhum dado novo para a tabela '{nome_tabela}'.")
         return
-    tabela_destino = f"{GCP_PROJECT_ID}.{DATASET_ID}.{nome_tabela}"
-    logger.info(f"[UPSERT-DEBUG] Destino: {tabela_destino}")
-    logger.info(f"[UPSERT-DEBUG] Novos registros: {len(df_novos)} | Colunas: {list(df_novos.columns)}")
+
+    # Garante expurgo de fins de semana (sábado e domingo)
     if "data" in df_novos.columns:
-        logger.info(f"[UPSERT-DEBUG] Datas nos novos: {sorted(df_novos['data'].unique())[-5:]}")
+        df_novos = df_novos[pd.to_datetime(df_novos["data"]).dt.weekday < 5]
+
+    tabela_destino = f"{GCP_PROJECT_ID}.{DATASET_ID}.{nome_tabela}"
+    logger.info(f"[UPSERT] Destino: {tabela_destino}")
+    logger.info(f"[UPSERT] Novos registros: {len(df_novos)} | Colunas: {list(df_novos.columns)}")
+    if "data" in df_novos.columns:
+        logger.info(f"[UPSERT] Datas nos novos: {sorted(df_novos['data'].unique())[-5:]}")
 
     try:
         query = f"SELECT * FROM `{tabela_destino}`"
@@ -278,50 +425,58 @@ def upsert_tabela_blindada(client: bigquery.Client, df_novos: pd.DataFrame, nome
 
         if "data" in df_existente.columns:
             df_existente["data"] = pd.to_datetime(df_existente["data"]).dt.date
+            # Limpa fins de semana legados da base histórica se existirem
+            df_existente = df_existente[pd.to_datetime(df_existente["data"]).dt.weekday < 5]
         if "volume" in df_existente.columns:
             df_existente["volume"] = pd.to_numeric(df_existente["volume"], errors="coerce").fillna(0).astype("int64")
 
         qtd_existente = len(df_existente)
         logger.info(f"Lidos {qtd_existente} registros históricos existentes de '{tabela_destino}'.")
-        if "data" in df_existente.columns:
-            logger.info(f"[UPSERT-DEBUG] Última data existente: {df_existente['data'].max()}")
-            logger.info(f"[UPSERT-DEBUG] Colunas existentes: {list(df_existente.columns)}")
         df_consolidado = pd.concat([df_existente, df_novos], ignore_index=True)
     except Exception as e:
         logger.info(f"Tabela '{tabela_destino}' vazia ou nova: {e}")
         qtd_existente = 0
         df_consolidado = df_novos
+
     df_consolidado = df_consolidado.drop_duplicates(subset=chaves, keep="last")
     qtd_consolidada = len(df_consolidado)
-    logger.info(f"[UPSERT-DEBUG] Após dedup: {qtd_consolidada} registros")
-    if "data" in df_consolidado.columns:
-        logger.info(f"[UPSERT-DEBUG] Última data consolidada: {df_consolidado['data'].max()}")
-    if qtd_existente > 0 and qtd_consolidada < qtd_existente:
-        logger.error(f"❌ [TRAVA DE SEGURANÇA ACIONADA] Carga abortada: base consolidada ({qtd_consolidada}) menor que existente ({qtd_existente})!")
+
+    if qtd_existente > 0 and qtd_consolidada < (qtd_existente - 50):
+        logger.error(f"❌ [TRAVA DE SEGURANÇA ACIONADA] Carga abortada: base consolidada ({qtd_consolidada}) muito menor que existente ({qtd_existente})!")
         return
+
     job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
     logger.info(f"Carregando {qtd_consolidada} registros totais em '{tabela_destino}' (Padrão Não-Particionada)...")
     client.load_table_from_dataframe(df_consolidado, tabela_destino, job_config=job_config).result()
     logger.info(f"✅ [SUCESSO] Tabela '{tabela_destino}' atualizada com sucesso ({qtd_consolidada} registros preservados).")
+
+
 # ==============================================================================
 # 5. EXECUÇÃO PRINCIPAL
 # ==============================================================================
 def main():
     logger.info("=" * 70)
-    logger.info(f"INICIANDO ROTINA DE ATUALIZAÇÃO B3 -> BIGQUERY [{datetime.now()}]")
+    logger.info(f"INICIANDO ROTINA DE ATUALIZAÇÃO B3 -> BIGQUERY [{datetime.now(TZ_BSB)}]")
     logger.info("=" * 70)
+
     client = obter_cliente_bigquery()
-    # 1. Atualizar Dólar (primeiro, antes dos tickers que fazem muitas chamadas HTTP)
+
+    # 1. Atualizar Dólar (primeiro, para garantir cotação cambial do dia)
     df_dolar = extrair_fechamento_dolar()
     upsert_tabela_blindada(client, df_dolar, "Fato_fechamento_dolar", chaves=["data"])
+
     # 2. Atualizar Ibovespa
     df_ibov = extrair_fechamento_ibov()
     upsert_tabela_blindada(client, df_ibov, "Fato_fechamento_ibov", chaves=["data"])
+
     # 3. Atualizar Tickers da B3
     df_tickers = extrair_cotacoes_b3(client)
     upsert_tabela_blindada(client, df_tickers, "Fato_fechamento_tickers", chaves=["ticker", "data"])
+
     logger.info("=" * 70)
     logger.info("PIPELINE B3 FINALIZADO COM SUCESSO NO BIGQUERY!")
     logger.info("=" * 70)
+
+
 if __name__ == "__main__":
     main()
