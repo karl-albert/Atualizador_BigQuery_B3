@@ -39,7 +39,7 @@ RAW_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "b3-brasil-bolsa-balcao")
 GCP_PROJECT_ID = RAW_PROJECT_ID.strip() if RAW_PROJECT_ID else "b3-brasil-bolsa-balcao"
 DATASET_ID = os.environ.get("DATASET_ID", "B3").strip()
 
-START_DATE = date(2000, 1, 1)
+START_DATE = date(2020, 1, 1)
 
 # ==============================================================================
 # 1. CLIENTE BIGQUERY
