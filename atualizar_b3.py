@@ -2,18 +2,13 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-ATUALIZADOR AUTOMÁTICO B3 & MACROECONOMIA - GOOGLE BIGQUERY
+ATUALIZADOR AUTOMÁTICO B3 (MERCADO FINANCEIRO) - GOOGLE BIGQUERY
 ================================================================================
-Projeto: Pipeline de Dados B3 & Macroeconomia Brasil / Power BI
-Responsável: Karl Albert / Engenharia de Dados & BI
-Destino: Google BigQuery (Projeto: b3-brasil-bolsa-balcao | Dataset: B3)
+Execução: Segunda a Sexta-feira durante o pregão da B3
 Tabelas:
-  - Fato_B3_tickers          (Cotações diárias de todas as ações da B3)
-  - Fato_B3_ibov             (Pontos, máximas, mínimas e volume do Ibovespa)
-  - Fato_B3_dolar            (Cotação USD/BRL PTAX / Fechamento)
-  - Fato_Macro_Diarios       (Curvas de DI e Taxa Selic Diária/Meta)
-  - Fato_macro_Mensais       (IPCA, IGP-M, Salário Mínimo, CAGED, IBC-Br, FGV)
-  - Fato_macro_Trimestrais   (PIB Trimestral a Preços de Mercado)
+  - Fato_B3_dolar   (Dólar PTAX / Fechamento)
+  - Fato_B3_ibov    (Ibovespa)
+  - Fato_B3_tickers (Todas as Ações da B3)
 ================================================================================
 """
 
@@ -34,7 +29,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S"
 )
-logger = logging.getLogger("Atualizador_B3_Macro")
+logger = logging.getLogger("Atualizador_B3")
 
 # ==============================================================================
 # CONFIGURAÇÕES E VARIÁVEIS DE AMBIENTE
@@ -290,75 +285,7 @@ def extrair_fechamento_dolar() -> pd.DataFrame:
 
 
 # ==============================================================================
-# 4. EXTRAÇÃO MACROECONÔMICA (BACEN SGS)
-# ==============================================================================
-def extrair_serie_bcb(codigo: int, nome_indicador: str, categoria: str, grupo: str, unidade: str, frequencia: str, fonte: str) -> pd.DataFrame:
-    """Baixa série histórica do SGS Banco Central."""
-    try:
-        url = f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{codigo}/dados?formato=json"
-        resp = requests.get(url, timeout=20)
-        if resp.status_code == 200:
-            df = pd.DataFrame(resp.json())
-            df["data"] = pd.to_datetime(df["data"], format="%d/%m/%Y").dt.date
-            df = df[df["data"] >= date(2000, 1, 1)].copy()
-            df["categoria"] = categoria
-            df["grupo"] = grupo
-            df["indicador"] = nome_indicador
-            df["valor"] = pd.to_numeric(df["valor"], errors="coerce")
-            df["unidade"] = unidade
-            df["frequencia"] = frequencia
-            df["fonte"] = fonte
-            df["codigo_fonte"] = f"BCB SGS {codigo}"
-            return df.dropna(subset=["valor"])
-    except Exception as e:
-        logger.error(f"Erro ao baixar série BCB {codigo} ({nome_indicador}): {e}")
-    return pd.DataFrame()
-
-
-def extrair_macro_mensais() -> pd.DataFrame:
-    """Coleta todos os indicadores mensais (CAGED, Salário Mínimo, IPCA, IGP-M, IBC-Br, etc.)."""
-    logger.info("Extraindo indicadores macroeconômicos mensais...")
-    series_cfg = [
-        (28763, "CAGED Total - Contratações CLT", "Macro Geral & Inflação", "Mercado de Trabalho", "Vagas", "Mensal", "MTE / BACEN"),
-        (28764, "CAGED 1 - Agropecuária", "Macro Geral & Inflação", "Mercado de Trabalho", "Vagas", "Mensal", "MTE / BACEN"),
-        (28765, "CAGED 2 - Indústria", "Macro Geral & Inflação", "Mercado de Trabalho", "Vagas", "Mensal", "MTE / BACEN"),
-        (28766, "CAGED 3 - Construção", "Macro Geral & Inflação", "Mercado de Trabalho", "Vagas", "Mensal", "MTE / BACEN"),
-        (28767, "CAGED 4 - Comércio", "Macro Geral & Inflação", "Mercado de Trabalho", "Vagas", "Mensal", "MTE / BACEN"),
-        (28768, "CAGED 5 - Serviços", "Macro Geral & Inflação", "Mercado de Trabalho", "Vagas", "Mensal", "MTE / BACEN"),
-        (1619, "Salário Mínimo", "Macro Geral & Inflação", "Renda & Trabalho", "R$", "Mensal", "Banco Central (BACEN)"),
-        (433, "8 IPCA Mensal (%)", "Macro Geral & Inflação", "Inflação Oficial", "%", "Mensal", "IBGE"),
-        (13522, "8 IPCA Acumulado 12 Meses (%)", "Macro Geral & Inflação", "Inflação Oficial", "%", "Mensal", "IBGE"),
-        (189, "IGP-M Mensal (%)", "Macro Geral & Inflação", "Inflação FGV", "%", "Mensal", "FGV IBRE"),
-        (188, "IGP-M Acumulado 12 Meses (%)", "Macro Geral & Inflação", "Inflação FGV", "%", "Mensal", "FGV IBRE"),
-        (24363, "7 IBC-Br Índice de Atividade Econômica", "Macro Geral & Inflação", "Atividade Econômica", "Pontos", "Mensal", "Banco Central (BACEN)"),
-        (29039, "9 Cupom IPCA / Juro Real Implícito (%)", "Macro Geral & Inflação", "Juro Real", "%", "Mensal", "Banco Central (BACEN)"),
-    ]
-    dfs = []
-    for cfg in series_cfg:
-        dft = extrair_serie_bcb(*cfg)
-        if not dft.empty:
-            dfs.append(dft)
-    if dfs:
-        return pd.concat(dfs, ignore_index=True)
-    return pd.DataFrame()
-
-
-def extrair_macro_trimestrais() -> pd.DataFrame:
-    """Coleta o PIB Trimestral (BCB SGS 4380)."""
-    logger.info("Extraindo PIB Trimestral...")
-    return extrair_serie_bcb(
-        codigo=4380,
-        nome_indicador="7 PIB Trimestral a Preços de Mercado",
-        categoria="Macro Geral & Inflação",
-        grupo="Atividade Econômica",
-        unidade="R$ Milhões",
-        frequencia="Trimestral",
-        fonte="IBGE / BACEN"
-    )
-
-
-# ==============================================================================
-# 5. CARGA INCREMENTAL BLINDADA NO BIGQUERY
+# 4. CARGA INCREMENTAL BLINDADA NO BIGQUERY
 # ==============================================================================
 def upsert_tabela_blindada(client: bigquery.Client, df_novos: pd.DataFrame, nome_tabela: str, chaves: list):
     """
@@ -410,11 +337,11 @@ def upsert_tabela_blindada(client: bigquery.Client, df_novos: pd.DataFrame, nome
 
 
 # ==============================================================================
-# 6. EXECUÇÃO PRINCIPAL
+# 5. EXECUÇÃO PRINCIPAL
 # ==============================================================================
 def main():
     logger.info("=" * 70)
-    logger.info(f"INICIANDO ROTINA DE ATUALIZAÇÃO B3 & MACRO -> BIGQUERY [{datetime.now()}]")
+    logger.info(f"INICIANDO ROTINA DE ATUALIZAÇÃO B3 -> BIGQUERY [{datetime.now()}]")
     logger.info("=" * 70)
 
     client = obter_cliente_bigquery()
@@ -431,16 +358,8 @@ def main():
     df_tickers = extrair_cotacoes_b3(client)
     upsert_tabela_blindada(client, df_tickers, "Fato_B3_tickers", chaves=["ticker", "data"])
 
-    # 4. Macro Mensais (IPCA, IGP-M, CAGED, Salário Mínimo, etc.)
-    df_macro_m = extrair_macro_mensais()
-    upsert_tabela_blindada(client, df_macro_m, "Fato_macro_mensais", chaves=["indicador", "data"])
-
-    # 5. PIB Trimestral
-    df_pib = extrair_macro_trimestrais()
-    upsert_tabela_blindada(client, df_pib, "Fato_macro_trimestrais", chaves=["indicador", "data"])
-
     logger.info("=" * 70)
-    logger.info("PIPELINE B3 & MACRO FINALIZADO COM 100% DE SUCESSO NO BIGQUERY!")
+    logger.info("PIPELINE B3 FINALIZADO COM 100% DE SUCESSO NO BIGQUERY!")
     logger.info("=" * 70)
 
 
