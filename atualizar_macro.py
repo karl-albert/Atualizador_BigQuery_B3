@@ -1,8 +1,9 @@
 # ==============================================================================
-# 🇧🇷 ATUALIZADOR AUTOMÁTICO DE MACROECONOMIA - GOOGLE BIGQUERY
+# 🇧🇷 ATUALIZADOR AUTOMÁTICO DE MACROECONOMIA - GOOGLE BIGQUERY (PADRÃO MERGE / INCREMENTAL)
 # ==============================================================================
 # Projeto: Dashboard B3 - Módulo de Macroeconomia
 # Execução: GitHub Actions / Local
+# Padrão: Carga Incremental com MERGE/Deduplicação e Trava de Segurança
 # Destino: Google BigQuery (Projeto: b3-brasil-bolsa-balcao | Dataset: B3)
 # Tabelas:
 #   - `Fato_macro_diarios`
@@ -28,7 +29,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S"
 )
-logger = logging.getLogger("Macro_BigQuery")
+logger = logging.getLogger("Macro_BigQuery_Merge")
 
 GCP_SA_KEY = os.environ.get("GCP_SA_KEY")
 RAW_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "b3-brasil-bolsa-balcao")
@@ -224,20 +225,59 @@ def extrair_trimestrais() -> pd.DataFrame:
 
 
 # ==============================================================================
-# 4. CARGA BLINDADA NO BIGQUERY
+# 4. CARGA INCREMENTAL / MERGE BLINDADO NO BIGQUERY
 # ==============================================================================
-def carregar_bigquery(client: bigquery.Client, df: pd.DataFrame, nome_tabela: str):
-    if df.empty:
-        logger.warning(f"⚠️ Sem dados para '{nome_tabela}'. Pulando.")
+def upsert_macro_bigquery(client: bigquery.Client, df_novos: pd.DataFrame, nome_tabela: str, chaves: list = ["data", "indicador"]):
+    """
+    Carga incremental com MERGE e proteção contra perda de dados:
+    1. Lê dados históricos já gravados no BigQuery.
+    2. Combina com novos registros e consolida pelas chaves ['data', 'indicador'].
+    3. Trava de segurança: impede que a tabela seja diminuída.
+    4. Grava a base consolidada atualizada.
+    """
+    if df_novos is None or df_novos.empty:
+        logger.info(f"Nenhum dado novo para a tabela '{nome_tabela}'.")
         return
 
-    table_id = f"{GCP_PROJECT_ID}.{DATASET_ID}.{nome_tabela}"
-    logger.info(f"📤 Enviando {len(df):,} linhas para '{table_id}'...")
+    tabela_destino = f"{GCP_PROJECT_ID}.{DATASET_ID}.{nome_tabela}"
+    agora_ts = datetime.now(TZ_BSB)
 
-    df_up = df.copy()
-    df_up["data"] = pd.to_datetime(df_up["data"]).dt.date
-    df_up["valor"] = pd.to_numeric(df_up["valor"], errors="coerce")
-    df_up["criado_em"] = datetime.now(TZ_BSB)
+    df_novos = df_novos.copy()
+    df_novos["data"] = pd.to_datetime(df_novos["data"]).dt.date
+    df_novos["valor"] = pd.to_numeric(df_novos["valor"], errors="coerce")
+    df_novos["atualizado_em"] = agora_ts
+
+    try:
+        query = f"SELECT * FROM `{tabela_destino}`"
+        df_existente = client.query(query).to_dataframe()
+        
+        if "data" in df_existente.columns:
+            df_existente["data"] = pd.to_datetime(df_existente["data"]).dt.date
+            
+        qtd_existente = len(df_existente)
+        logger.info(f"Lidos {qtd_existente} registros históricos existentes de '{tabela_destino}'.")
+        df_consolidado = pd.concat([df_existente, df_novos], ignore_index=True)
+    except Exception as e:
+        logger.info(f"Tabela '{tabela_destino}' nova ou vazia: {e}")
+        qtd_existente = 0
+        df_novos["criado_em"] = agora_ts
+        df_consolidado = df_novos
+
+    # Deduplicação pelas chaves (mantém o registro mais recente)
+    df_consolidado = df_consolidado.drop_duplicates(subset=chaves, keep="last")
+    
+    if "criado_em" not in df_consolidado.columns:
+        df_consolidado["criado_em"] = agora_ts
+    else:
+        df_consolidado["criado_em"] = df_consolidado["criado_em"].fillna(agora_ts)
+
+    df_consolidado["atualizado_em"] = agora_ts
+    qtd_consolidada = len(df_consolidado)
+
+    # Trava de Segurança
+    if qtd_existente > 0 and qtd_consolidada < qtd_existente:
+        logger.error(f"❌ [TRAVA DE SEGURANÇA ACIONADA] Carga abortada: base consolidada ({qtd_consolidada}) menor que existente ({qtd_existente})!")
+        return
 
     schema = [
         bigquery.SchemaField("data", "DATE", mode="REQUIRED"),
@@ -250,6 +290,7 @@ def carregar_bigquery(client: bigquery.Client, df: pd.DataFrame, nome_tabela: st
         bigquery.SchemaField("fonte", "STRING", mode="NULLABLE"),
         bigquery.SchemaField("codigo_fonte", "STRING", mode="NULLABLE"),
         bigquery.SchemaField("criado_em", "TIMESTAMP", mode="NULLABLE"),
+        bigquery.SchemaField("atualizado_em", "TIMESTAMP", mode="NULLABLE"),
     ]
 
     job_config = bigquery.LoadJobConfig(
@@ -257,35 +298,35 @@ def carregar_bigquery(client: bigquery.Client, df: pd.DataFrame, nome_tabela: st
         write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE
     )
 
-    job = client.load_table_from_dataframe(df_up, table_id, job_config=job_config)
-    job.result()
-    logger.info(f"✅ Tabela '{table_id}' criada/atualizada com sucesso no BigQuery ({len(df_up):,} linhas)!")
+    logger.info(f"Carregando {qtd_consolidada:,} registros consolidados em '{tabela_destino}'...")
+    client.load_table_from_dataframe(df_consolidado, tabela_destino, job_config=job_config).result()
+    logger.info(f"✅ [MERGE SUCESSO] Tabela '{tabela_destino}' atualizada com sucesso ({qtd_consolidada:,} registros preservados).")
 
 
 # ==============================================================================
-# 🚀 EXECUÇÃO PRINCIPAL
+# 🚀 5. EXECUÇÃO PRINCIPAL
 # ==============================================================================
 def main():
     logger.info("=" * 75)
-    logger.info("🇧🇷 INICIANDO ATUALIZAÇÃO DE MACROECONOMIA NO GOOGLE BIGQUERY")
+    logger.info("🇧🇷 ATUALIZAÇÃO INCREMENTAL DE MACROECONOMIA NO BIGQUERY (PADRÃO MERGE)")
     logger.info("=" * 75)
 
     client = obter_cliente_bigquery()
 
     # 1. Diários
     df_diarios = extrair_diarios()
-    carregar_bigquery(client, df_diarios, "Fato_macro_diarios")
+    upsert_macro_bigquery(client, df_diarios, "Fato_macro_diarios", chaves=["data", "indicador"])
 
     # 2. Mensais
     df_mensais = extrair_mensais()
-    carregar_bigquery(client, df_mensais, "Fato_macro_mensais")
+    upsert_macro_bigquery(client, df_mensais, "Fato_macro_mensais", chaves=["data", "indicador"])
 
     # 3. Trimestrais
     df_trimestrais = extrair_trimestrais()
-    carregar_bigquery(client, df_trimestrais, "Fato_macro_trimestrais")
+    upsert_macro_bigquery(client, df_trimestrais, "Fato_macro_trimestrais", chaves=["data", "indicador"])
 
     logger.info("=" * 75)
-    logger.info("🎉 TODAS AS 3 TABELAS FORAM CRIADAS E ATUALIZADAS NO BIGQUERY COM SUCESSO!")
+    logger.info("🎉 TODAS AS 3 TABELAS FORAM ATUALIZADAS VIA MERGE NO BIGQUERY COM SUCESSO!")
     logger.info("=" * 75)
 
 
