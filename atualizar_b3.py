@@ -2,15 +2,15 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-ATUALIZADOR AUTOMÁTICO B3 - GOOGLE BIGQUERY (PADRÃO NÃO-PARTICIONADO & ROBUSTO)
+ATUALIZADOR AUTOMÁTICO B3 - GOOGLE BIGQUERY (PADRÃO ENXUTO & SEM REDUNDÂNCIA)
 ================================================================================
 Projeto: Pipeline de Dados B3 (Mercado Brasileiro) & Power BI
 Responsável: Karl Albert / Engenharia de Dados & BI
 Destino: Google BigQuery (Projeto: b3-brasil-bolsa-balcao | Dataset: B3)
-Tabelas:
-  - Fato_fechamento_tickers / Fato_B3_tickers
-  - Fato_fechamento_ibov    / Fato_B3_ibov
-  - Fato_fechamento_dolar   / Fato_B3_dolar
+Tabelas Oficiais Únicas:
+  - Fato_fechamento_tickers (Cotações diárias/intraday de ações da B3)
+  - Fato_fechamento_ibov    (Pontos e volume do Ibovespa)
+  - Fato_fechamento_dolar   (Cotação USD/BRL diária)
 ================================================================================
 """
 
@@ -127,18 +127,13 @@ def extrair_todos_tickers_yfinance(client: bigquery.Client) -> pd.DataFrame:
     """Extrai cotações recentes de todos os tickers da B3 em paralelo."""
     tickers = []
     try:
-        for t_name in ["Fato_fechamento_tickers", "Fato_B3_tickers"]:
-            try:
-                q_tickers = f"SELECT DISTINCT ticker FROM `{GCP_PROJECT_ID}.{DATASET_ID}.{t_name}` WHERE ticker IS NOT NULL"
-                df_t = client.query(q_tickers).to_dataframe()
-                tickers = df_t["ticker"].dropna().unique().tolist()
-                if tickers:
-                    logger.info(f"Lista de {len(tickers)} ativos obtida da tabela {t_name}.")
-                    break
-            except Exception:
-                pass
+        q_tickers = f"SELECT DISTINCT ticker FROM `{GCP_PROJECT_ID}.{DATASET_ID}.Fato_fechamento_tickers` WHERE ticker IS NOT NULL"
+        df_t = client.query(q_tickers).to_dataframe()
+        tickers = df_t["ticker"].dropna().unique().tolist()
+        if tickers:
+            logger.info(f"Lista de {len(tickers)} ativos obtida da tabela Fato_fechamento_tickers.")
     except Exception as e:
-        logger.warning(f"Erro ao obter lista de tickers do BigQuery: {e}.")
+        logger.warning(f"Erro ao obter lista de tickers da tabela oficial do BigQuery: {e}.")
 
     if not tickers:
         logger.info("Usando lista base ampliada de ativos.")
@@ -166,7 +161,7 @@ def extrair_todos_tickers_yfinance(client: bigquery.Client) -> pd.DataFrame:
                     cutoff_date = date.today() - timedelta(days=7)
                     for ts, c, o, v in zip(timestamps, closes, opens, volumes):
                         d_dt = datetime.fromtimestamp(ts).date()
-                        if d_dt >= cutoff_date:
+                        if d_dt >= cutoff_date and d_dt.weekday() < 5:
                             preco_final = c if c is not None else reg_price
                             if preco_final is not None:
                                 preco = round(float(preco_final), 2)
@@ -276,7 +271,7 @@ def extrair_fechamento_dolar() -> pd.DataFrame:
     """Obtém cotações diárias do Dólar Comercial (USD/BRL) via AwesomeAPI com fallback Yahoo."""
     registros = []
     
-    # 1. Tentar AwesomeAPI (últimos 30 dias)
+    # 1. AwesomeAPI (últimos 30 dias)
     try:
         url = "https://economia.awesomeapi.com.br/json/daily/USD-BRL/30"
         resp = requests.get(url, timeout=30)
@@ -285,7 +280,7 @@ def extrair_fechamento_dolar() -> pd.DataFrame:
             for item in dados:
                 ts = int(item["timestamp"])
                 d_dt = datetime.fromtimestamp(ts).date()
-                if d_dt.weekday() < 5: # Apenas dias úteis (segunda a sexta)
+                if d_dt.weekday() < 5:
                     compra = round(float(item["bid"]), 4)
                     venda = round(float(item["ask"]), 4)
                     maxima = round(float(item["high"]), 4)
@@ -303,7 +298,7 @@ def extrair_fechamento_dolar() -> pd.DataFrame:
     except Exception as e:
         logger.warning(f"Falha na AwesomeAPI: {e}")
 
-    # 2. Fallback / Complemento via Yahoo Finance (USDBRL=X)
+    # 2. Fallback via Yahoo Finance (USDBRL=X)
     if len(registros) < 5:
         try:
             url_yf = "https://query1.finance.yahoo.com/v8/finance/chart/USDBRL=X?range=30d&interval=1d"
@@ -314,10 +309,9 @@ def extrair_fechamento_dolar() -> pd.DataFrame:
                 timestamps = result.get("timestamp", [])
                 quotes = result.get("indicators", {}).get("quote", [{}])[0]
                 closes = quotes.get("close", [])
-                opens = quotes.get("open", [])
                 highs = quotes.get("high", [])
                 lows = quotes.get("low", [])
-                for ts, c, o, h, l in zip(timestamps, closes, opens, highs, lows):
+                for ts, c, h, l in zip(timestamps, closes, highs, lows):
                     d_dt = datetime.fromtimestamp(ts).date()
                     if d_dt.weekday() < 5 and c is not None:
                         val = round(float(c), 4)
@@ -337,7 +331,6 @@ def extrair_fechamento_dolar() -> pd.DataFrame:
         df["data"] = pd.to_datetime(df["data"]).dt.date
         df = df.drop_duplicates(subset=["data"], keep="last")
         df = df.sort_values("data")
-        # Recalcular variação % diária de forma consistente
         df["variacao"] = ((df["compra"] - df["compra"].shift(1)) / df["compra"].shift(1) * 100).round(2).fillna(0.0)
         logger.info(f"Dólar USD/BRL: {len(df)} cotações diárias consolidadas até {df['data'].max()}.")
         return df
@@ -346,15 +339,15 @@ def extrair_fechamento_dolar() -> pd.DataFrame:
 
 
 # ==============================================================================
-# 4. CARGA INCREMENTAL BLINDADA (TABELA PADRÃO NÃO-PARTICIONADA)
+# 4. CARGA INCREMENTAL BLINDADA (TABELAS OFICIAIS ÚNICAS)
 # ==============================================================================
 def upsert_tabela_blindada(client: bigquery.Client, df_novos: pd.DataFrame, nome_tabela: str, chaves: list):
     """
-    Carga incremental blindada (Tabela padrão não-particionada):
+    Carga incremental blindada única (Tabela padrão não-particionada):
     1. Lê a base completa existente no BigQuery.
     2. Consolida com os novos registros e desduplica pelas chaves.
     3. Trata colunas e timestamps de forma consistente.
-    4. Grava em tabela padrão plana.
+    4. Grava em tabela padrão plana sem consumir créditos extras.
     """
     if df_novos is None or df_novos.empty:
         logger.info(f"Nenhum dado novo para a tabela '{nome_tabela}'.")
@@ -402,7 +395,7 @@ def upsert_tabela_blindada(client: bigquery.Client, df_novos: pd.DataFrame, nome
 
 
 # ==============================================================================
-# 5. EXECUÇÃO PRINCIPAL
+# 5. EXECUÇÃO PRINCIPAL (APENAS AS 3 TABELAS OFICIAIS DO POWER BI)
 # ==============================================================================
 def main():
     logger.info("=" * 70)
@@ -411,23 +404,20 @@ def main():
 
     client = obter_cliente_bigquery()
 
-    # 1. Atualizar Tickers da B3
+    # 1. Ações da B3 -> Apenas Fato_fechamento_tickers
     df_tickers = extrair_cotacoes_b3(client)
     upsert_tabela_blindada(client, df_tickers, "Fato_fechamento_tickers", chaves=["ticker", "data"])
-    upsert_tabela_blindada(client, df_tickers, "Fato_B3_tickers", chaves=["ticker", "data"])
 
-    # 2. Atualizar Ibovespa
+    # 2. Ibovespa -> Apenas Fato_fechamento_ibov
     df_ibov = extrair_fechamento_ibov()
     upsert_tabela_blindada(client, df_ibov, "Fato_fechamento_ibov", chaves=["data"])
-    upsert_tabela_blindada(client, df_ibov, "Fato_B3_ibov", chaves=["data"])
 
-    # 3. Atualizar Dólar (AwesomeAPI 30 dias + fallback Yahoo Finance)
+    # 3. Dólar -> Apenas Fato_fechamento_dolar
     df_dolar = extrair_fechamento_dolar()
     upsert_tabela_blindada(client, df_dolar, "Fato_fechamento_dolar", chaves=["data"])
-    upsert_tabela_blindada(client, df_dolar, "Fato_B3_dolar", chaves=["data"])
 
     logger.info("=" * 70)
-    logger.info("PIPELINE B3 FINALIZADO COM SUCESSO NO BIGQUERY!")
+    logger.info("PIPELINE B3 FINALIZADO COM SUCESSO NO BIGQUERY (SEM REDUNDÂNCIAS)!")
     logger.info("=" * 70)
 
 
