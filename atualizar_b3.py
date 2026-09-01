@@ -235,7 +235,7 @@ def normalizar_df_tickers(df: pd.DataFrame) -> pd.DataFrame:
 def extrair_fechamento_ibov() -> pd.DataFrame:
     """Obtém os últimos pontos e volume do Ibovespa."""
     try:
-        url_ibov = "https://query1.finance.yahoo.com/v8/finance/chart/%5EBVSP?range=10d&interval=1d"
+        url_ibov = "https://query1.finance.yahoo.com/v8/finance/chart/%5EBVSP?range=15d&interval=1d"
         r_ibov = requests.get(url_ibov, headers=HEADERS_REQ, timeout=10)
         if r_ibov.status_code == 200:
             res = r_ibov.json()
@@ -247,7 +247,7 @@ def extrair_fechamento_ibov() -> pd.DataFrame:
             timestamps = result.get("timestamp", [])
             quotes = result.get("indicators", {}).get("quote", [{}])[0]
             rows_ibov = []
-            cutoff_date = date.today() - timedelta(days=7)
+            cutoff_date = date.today() - timedelta(days=14)
             for ts, c, o, h, l, v in zip(timestamps, quotes.get("close", []), quotes.get("open", []), quotes.get("high", []), quotes.get("low", []), quotes.get("volume", [])):
                 d_dt = datetime.fromtimestamp(ts).date()
                 if d_dt >= cutoff_date:
@@ -273,9 +273,9 @@ def extrair_fechamento_ibov() -> pd.DataFrame:
 
 
 def extrair_fechamento_dolar() -> pd.DataFrame:
-    """Obtém cotações diárias do Dólar Comercial (USD/BRL) via AwesomeAPI."""
+    """Obtém cotações diárias do Dólar Comercial (USD/BRL) via AwesomeAPI (últimos 30 dias)."""
     try:
-        url = "https://economia.awesomeapi.com.br/json/daily/USD-BRL/15"
+        url = "https://economia.awesomeapi.com.br/json/daily/USD-BRL/30"
         resp = requests.get(url, timeout=30)
         if resp.status_code == 200:
             dados = resp.json()
@@ -362,7 +362,7 @@ def main():
 
     client = obter_cliente_bigquery()
 
-    # 1. Atualizar Tickers da B3 (atualiza tanto Fato_fechamento_tickers quanto Fato_B3_tickers)
+    # 1. Atualizar Tickers da B3
     df_tickers = extrair_cotacoes_b3(client)
     upsert_tabela_blindada(client, df_tickers, "Fato_fechamento_tickers", chaves=["ticker", "data"])
     upsert_tabela_blindada(client, df_tickers, "Fato_B3_tickers", chaves=["ticker", "data"])
@@ -372,7 +372,7 @@ def main():
     upsert_tabela_blindada(client, df_ibov, "Fato_fechamento_ibov", chaves=["data"])
     upsert_tabela_blindada(client, df_ibov, "Fato_B3_ibov", chaves=["data"])
 
-    # 3. Atualizar Dólar
+    # 3. Atualizar Dólar (AwesomeAPI 30 dias)
     df_dolar = extrair_fechamento_dolar()
     upsert_tabela_blindada(client, df_dolar, "Fato_fechamento_dolar", chaves=["data"])
     upsert_tabela_blindada(client, df_dolar, "Fato_B3_dolar", chaves=["data"])
