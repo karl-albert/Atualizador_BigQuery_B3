@@ -124,7 +124,7 @@ def extrair_cotacoes_b3(client: bigquery.Client) -> pd.DataFrame:
 
 
 def extrair_todos_tickers_yfinance(client: bigquery.Client) -> pd.DataFrame:
-    """Extrai cotações recentes de todos os 579+ tickers da B3 em paralelo."""
+    """Extrai cotações recentes de todos os tickers da B3 em paralelo."""
     tickers = []
     try:
         for t_name in ["Fato_fechamento_tickers", "Fato_B3_tickers"]:
@@ -235,7 +235,7 @@ def normalizar_df_tickers(df: pd.DataFrame) -> pd.DataFrame:
 def extrair_fechamento_ibov() -> pd.DataFrame:
     """Obtém os últimos pontos e volume do Ibovespa."""
     try:
-        url_ibov = "https://query1.finance.yahoo.com/v8/finance/chart/%5EBVSP?range=15d&interval=1d"
+        url_ibov = "https://query1.finance.yahoo.com/v8/finance/chart/%5EBVSP?range=20d&interval=1d"
         r_ibov = requests.get(url_ibov, headers=HEADERS_REQ, timeout=10)
         if r_ibov.status_code == 200:
             res = r_ibov.json()
@@ -247,10 +247,10 @@ def extrair_fechamento_ibov() -> pd.DataFrame:
             timestamps = result.get("timestamp", [])
             quotes = result.get("indicators", {}).get("quote", [{}])[0]
             rows_ibov = []
-            cutoff_date = date.today() - timedelta(days=14)
+            cutoff_date = date.today() - timedelta(days=20)
             for ts, c, o, h, l, v in zip(timestamps, quotes.get("close", []), quotes.get("open", []), quotes.get("high", []), quotes.get("low", []), quotes.get("volume", [])):
                 d_dt = datetime.fromtimestamp(ts).date()
-                if d_dt >= cutoff_date:
+                if d_dt >= cutoff_date and d_dt.weekday() < 5:
                     fech_raw = c if c is not None else reg_price
                     if fech_raw:
                         fech = round(float(fech_raw), 2)
@@ -273,35 +273,75 @@ def extrair_fechamento_ibov() -> pd.DataFrame:
 
 
 def extrair_fechamento_dolar() -> pd.DataFrame:
-    """Obtém cotações diárias do Dólar Comercial (USD/BRL) via AwesomeAPI (últimos 30 dias)."""
+    """Obtém cotações diárias do Dólar Comercial (USD/BRL) via AwesomeAPI com fallback Yahoo."""
+    registros = []
+    
+    # 1. Tentar AwesomeAPI (últimos 30 dias)
     try:
         url = "https://economia.awesomeapi.com.br/json/daily/USD-BRL/30"
         resp = requests.get(url, timeout=30)
         if resp.status_code == 200:
             dados = resp.json()
-            registros = []
             for item in dados:
                 ts = int(item["timestamp"])
                 d_dt = datetime.fromtimestamp(ts).date()
-                compra = round(float(item["bid"]), 4)
-                venda = round(float(item["ask"]), 4)
-                maxima = round(float(item["high"]), 4)
-                minima = round(float(item["low"]), 4)
-                var = round(float(item["pctChange"]), 2)
-                
-                registros.append({
-                    "data": d_dt,
-                    "compra": compra,
-                    "venda": venda,
-                    "maxima": maxima,
-                    "minima": minima,
-                    "variacao": var
-                })
-            df = pd.DataFrame(registros)
-            df["data"] = pd.to_datetime(df["data"]).dt.date
-            return df.drop_duplicates(subset=["data"], keep="last")
+                if d_dt.weekday() < 5: # Apenas dias úteis (segunda a sexta)
+                    compra = round(float(item["bid"]), 4)
+                    venda = round(float(item["ask"]), 4)
+                    maxima = round(float(item["high"]), 4)
+                    minima = round(float(item["low"]), 4)
+                    var = round(float(item.get("pctChange", 0.0)), 2)
+                    
+                    registros.append({
+                        "data": d_dt,
+                        "compra": compra,
+                        "venda": venda,
+                        "maxima": maxima,
+                        "minima": minima,
+                        "variacao": var
+                    })
     except Exception as e:
-        logger.warning(f"Não foi possível obter cotações do Dólar: {e}")
+        logger.warning(f"Falha na AwesomeAPI: {e}")
+
+    # 2. Fallback / Complemento via Yahoo Finance (USDBRL=X)
+    if len(registros) < 5:
+        try:
+            url_yf = "https://query1.finance.yahoo.com/v8/finance/chart/USDBRL=X?range=30d&interval=1d"
+            r_yf = requests.get(url_yf, headers=HEADERS_REQ, timeout=15)
+            if r_yf.status_code == 200:
+                res = r_yf.json()
+                result = res.get("chart", {}).get("result", [])[0]
+                timestamps = result.get("timestamp", [])
+                quotes = result.get("indicators", {}).get("quote", [{}])[0]
+                closes = quotes.get("close", [])
+                opens = quotes.get("open", [])
+                highs = quotes.get("high", [])
+                lows = quotes.get("low", [])
+                for ts, c, o, h, l in zip(timestamps, closes, opens, highs, lows):
+                    d_dt = datetime.fromtimestamp(ts).date()
+                    if d_dt.weekday() < 5 and c is not None:
+                        val = round(float(c), 4)
+                        registros.append({
+                            "data": d_dt,
+                            "compra": val,
+                            "venda": val,
+                            "maxima": round(float(h), 4) if h else val,
+                            "minima": round(float(l), 4) if l else val,
+                            "variacao": 0.0
+                        })
+        except Exception as e:
+            logger.warning(f"Falha no fallback Yahoo Finance USDBRL: {e}")
+
+    if registros:
+        df = pd.DataFrame(registros)
+        df["data"] = pd.to_datetime(df["data"]).dt.date
+        df = df.drop_duplicates(subset=["data"], keep="last")
+        df = df.sort_values("data")
+        # Recalcular variação % diária de forma consistente
+        df["variacao"] = ((df["compra"] - df["compra"].shift(1)) / df["compra"].shift(1) * 100).round(2).fillna(0.0)
+        logger.info(f"Dólar USD/BRL: {len(df)} cotações diárias consolidadas até {df['data'].max()}.")
+        return df
+
     return pd.DataFrame()
 
 
@@ -313,7 +353,7 @@ def upsert_tabela_blindada(client: bigquery.Client, df_novos: pd.DataFrame, nome
     Carga incremental blindada (Tabela padrão não-particionada):
     1. Lê a base completa existente no BigQuery.
     2. Consolida com os novos registros e desduplica pelas chaves.
-    3. Trava de segurança: impede redução de volume de dados.
+    3. Trata colunas e timestamps de forma consistente.
     4. Grava em tabela padrão plana.
     """
     if df_novos is None or df_novos.empty:
@@ -321,6 +361,7 @@ def upsert_tabela_blindada(client: bigquery.Client, df_novos: pd.DataFrame, nome
         return
 
     tabela_destino = f"{GCP_PROJECT_ID}.{DATASET_ID}.{nome_tabela}"
+    now = datetime.now()
     
     try:
         query = f"SELECT * FROM `{tabela_destino}`"
@@ -332,12 +373,12 @@ def upsert_tabela_blindada(client: bigquery.Client, df_novos: pd.DataFrame, nome
             df_existente["volume"] = pd.to_numeric(df_existente["volume"], errors="coerce").fillna(0).astype("int64")
             
         qtd_existente = len(df_existente)
-        logger.info(f"Lidos {qtd_existente} registros históricos existentes de '{tabela_destino}'.")
+        logger.info(f"Lidos {qtd_existente} registros históricos de '{tabela_destino}'.")
         df_consolidado = pd.concat([df_existente, df_novos], ignore_index=True)
     except Exception as e:
         logger.info(f"Tabela '{tabela_destino}' vazia ou nova: {e}")
         qtd_existente = 0
-        df_consolidado = df_novos
+        df_consolidado = df_novos.copy()
 
     df_consolidado = df_consolidado.drop_duplicates(subset=chaves, keep="last")
     qtd_consolidada = len(df_consolidado)
@@ -346,8 +387,16 @@ def upsert_tabela_blindada(client: bigquery.Client, df_novos: pd.DataFrame, nome
         logger.error(f"❌ [TRAVA DE SEGURANÇA ACIONADA] Carga abortada: base consolidada ({qtd_consolidada}) menor que existente ({qtd_existente})!")
         return
 
+    # Garante timestamps válidos e consistentes
+    if "criado_em" in df_consolidado.columns:
+        df_consolidado["criado_em"] = pd.to_datetime(df_consolidado["criado_em"]).fillna(now)
+    else:
+        df_consolidado["criado_em"] = now
+
+    df_consolidado["atualizado_em"] = now
+
     job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
-    logger.info(f"Carregando {qtd_consolidada} registros totais em '{tabela_destino}' (Padrão Não-Particionada)...")
+    logger.info(f"Carregando {qtd_consolidada} registros totais em '{tabela_destino}'...")
     client.load_table_from_dataframe(df_consolidado, tabela_destino, job_config=job_config).result()
     logger.info(f"✅ [SUCESSO] Tabela '{tabela_destino}' atualizada com sucesso ({qtd_consolidada} registros preservados).")
 
@@ -372,7 +421,7 @@ def main():
     upsert_tabela_blindada(client, df_ibov, "Fato_fechamento_ibov", chaves=["data"])
     upsert_tabela_blindada(client, df_ibov, "Fato_B3_ibov", chaves=["data"])
 
-    # 3. Atualizar Dólar (AwesomeAPI 30 dias)
+    # 3. Atualizar Dólar (AwesomeAPI 30 dias + fallback Yahoo Finance)
     df_dolar = extrair_fechamento_dolar()
     upsert_tabela_blindada(client, df_dolar, "Fato_fechamento_dolar", chaves=["data"])
     upsert_tabela_blindada(client, df_dolar, "Fato_B3_dolar", chaves=["data"])
