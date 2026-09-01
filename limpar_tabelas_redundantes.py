@@ -2,14 +2,14 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-SCRIPT DE LIMPEZA DE TABELAS REDUNDANTES NO GOOGLE BIGQUERY
+SCRIPT DE LIMPEZA DE TABELAS NÃO-OFICIAIS NO GOOGLE BIGQUERY
 ================================================================================
 Projeto: Pipeline de Dados B3
 Destino: Google BigQuery (Projeto: b3-brasil-bolsa-balcao | Dataset: B3)
-Tabelas a serem excluídas:
-  - Fato_B3_tickers
-  - Fato_B3_ibov
-  - Fato_B3_dolar
+Tabelas a serem excluídas (Não-Oficiais):
+  - Fato_fechamento_tickers
+  - Fato_fechamento_ibov
+  - Fato_fechamento_dolar
 ================================================================================
 """
 
@@ -51,17 +51,17 @@ def obter_cliente_bigquery():
 def main():
     client = obter_cliente_bigquery()
     tabelas_para_apagar = [
-        "Fato_B3_tickers",
-        "Fato_B3_ibov",
-        "Fato_B3_dolar"
+        "Fato_fechamento_tickers",
+        "Fato_fechamento_ibov",
+        "Fato_fechamento_dolar"
     ]
     
-    logger.info("Iniciando exclusão de tabelas redundantes...")
+    logger.info("Iniciando exclusão das tabelas não-oficiais (Fato_fechamento_*)...")
     for tab in tabelas_para_apagar:
         tabela_ref = f"{GCP_PROJECT_ID}.{DATASET_ID}.{tab}"
         try:
             client.delete_table(tabela_ref, not_found_ok=True)
-            logger.info(f"✅ Tabela '{tabela_ref}' excluída com sucesso (ou já não existia).")
+            logger.info(f"✅ Tabela antiga '{tabela_ref}' excluída com sucesso.")
         except Exception as e:
             logger.warning(f"Não foi possível excluir '{tabela_ref}': {e}")
             

@@ -2,15 +2,15 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-ATUALIZADOR AUTOMÁTICO B3 - GOOGLE BIGQUERY (PADRÃO ENXUTO & SEM REDUNDÂNCIA)
+ATUALIZADOR AUTOMÁTICO B3 - GOOGLE BIGQUERY (PADRÃO OFICIAL: Fato_B3_*)
 ================================================================================
 Projeto: Pipeline de Dados B3 (Mercado Brasileiro) & Power BI
 Responsável: Karl Albert / Engenharia de Dados & BI
 Destino: Google BigQuery (Projeto: b3-brasil-bolsa-balcao | Dataset: B3)
 Tabelas Oficiais Únicas:
-  - Fato_fechamento_tickers (Cotações diárias/intraday de ações da B3)
-  - Fato_fechamento_ibov    (Pontos e volume do Ibovespa)
-  - Fato_fechamento_dolar   (Cotação USD/BRL diária)
+  - Fato_B3_tickers (Cotações diárias/intraday de ações da B3)
+  - Fato_B3_ibov    (Pontos e volume do Ibovespa)
+  - Fato_B3_dolar   (Cotação USD/BRL diária)
 ================================================================================
 """
 
@@ -55,7 +55,7 @@ HEADERS_REQ = {
 # 1. CLIENTE BIGQUERY
 # ==============================================================================
 def obter_cliente_bigquery():
-    """Inicializa o cliente do Google BigQuery via Service Account ou ADC de forma resiliente."""
+    """Inicializa o cliente do Google BigQuery via Service Account ou ADC."""
     global GCP_PROJECT_ID
     try:
         if GCP_SA_KEY:
@@ -127,13 +127,13 @@ def extrair_todos_tickers_yfinance(client: bigquery.Client) -> pd.DataFrame:
     """Extrai cotações recentes de todos os tickers da B3 em paralelo."""
     tickers = []
     try:
-        q_tickers = f"SELECT DISTINCT ticker FROM `{GCP_PROJECT_ID}.{DATASET_ID}.Fato_fechamento_tickers` WHERE ticker IS NOT NULL"
+        q_tickers = f"SELECT DISTINCT ticker FROM `{GCP_PROJECT_ID}.{DATASET_ID}.Fato_B3_tickers` WHERE ticker IS NOT NULL"
         df_t = client.query(q_tickers).to_dataframe()
         tickers = df_t["ticker"].dropna().unique().tolist()
         if tickers:
-            logger.info(f"Lista de {len(tickers)} ativos obtida da tabela Fato_fechamento_tickers.")
+            logger.info(f"Lista de {len(tickers)} ativos obtida da tabela Fato_B3_tickers.")
     except Exception as e:
-        logger.warning(f"Erro ao obter lista de tickers da tabela oficial do BigQuery: {e}.")
+        logger.warning(f"Erro ao obter lista de tickers da tabela oficial Fato_B3_tickers: {e}.")
 
     if not tickers:
         logger.info("Usando lista base ampliada de ativos.")
@@ -339,15 +339,15 @@ def extrair_fechamento_dolar() -> pd.DataFrame:
 
 
 # ==============================================================================
-# 4. CARGA INCREMENTAL BLINDADA (TABELAS OFICIAIS ÚNICAS)
+# 4. CARGA INCREMENTAL BLINDADA (TABELAS OFICIAIS Fato_B3_*)
 # ==============================================================================
 def upsert_tabela_blindada(client: bigquery.Client, df_novos: pd.DataFrame, nome_tabela: str, chaves: list):
     """
-    Carga incremental blindada única (Tabela padrão não-particionada):
+    Carga incremental blindada única:
     1. Lê a base completa existente no BigQuery.
     2. Consolida com os novos registros e desduplica pelas chaves.
     3. Trata colunas e timestamps de forma consistente.
-    4. Grava em tabela padrão plana sem consumir créditos extras.
+    4. Grava em tabela padrão plana oficial.
     """
     if df_novos is None or df_novos.empty:
         logger.info(f"Nenhum dado novo para a tabela '{nome_tabela}'.")
@@ -380,7 +380,6 @@ def upsert_tabela_blindada(client: bigquery.Client, df_novos: pd.DataFrame, nome
         logger.error(f"❌ [TRAVA DE SEGURANÇA ACIONADA] Carga abortada: base consolidada ({qtd_consolidada}) menor que existente ({qtd_existente})!")
         return
 
-    # Garante timestamps válidos e consistentes
     if "criado_em" in df_consolidado.columns:
         df_consolidado["criado_em"] = pd.to_datetime(df_consolidado["criado_em"]).fillna(now)
     else:
@@ -391,11 +390,11 @@ def upsert_tabela_blindada(client: bigquery.Client, df_novos: pd.DataFrame, nome
     job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
     logger.info(f"Carregando {qtd_consolidada} registros totais em '{tabela_destino}'...")
     client.load_table_from_dataframe(df_consolidado, tabela_destino, job_config=job_config).result()
-    logger.info(f"✅ [SUCESSO] Tabela '{tabela_destino}' atualizada com sucesso ({qtd_consolidada} registros preservados).")
+    logger.info(f"✅ [SUCESSO] Tabela oficial '{tabela_destino}' atualizada com sucesso ({qtd_consolidada} registros preservados).")
 
 
 # ==============================================================================
-# 5. EXECUÇÃO PRINCIPAL (APENAS AS 3 TABELAS OFICIAIS DO POWER BI)
+# 5. EXECUÇÃO PRINCIPAL (TABELAS OFICIAIS: Fato_B3_*)
 # ==============================================================================
 def main():
     logger.info("=" * 70)
@@ -404,20 +403,20 @@ def main():
 
     client = obter_cliente_bigquery()
 
-    # 1. Ações da B3 -> Apenas Fato_fechamento_tickers
+    # 1. Ações da B3 -> Fato_B3_tickers
     df_tickers = extrair_cotacoes_b3(client)
-    upsert_tabela_blindada(client, df_tickers, "Fato_fechamento_tickers", chaves=["ticker", "data"])
+    upsert_tabela_blindada(client, df_tickers, "Fato_B3_tickers", chaves=["ticker", "data"])
 
-    # 2. Ibovespa -> Apenas Fato_fechamento_ibov
+    # 2. Ibovespa -> Fato_B3_ibov
     df_ibov = extrair_fechamento_ibov()
-    upsert_tabela_blindada(client, df_ibov, "Fato_fechamento_ibov", chaves=["data"])
+    upsert_tabela_blindada(client, df_ibov, "Fato_B3_ibov", chaves=["data"])
 
-    # 3. Dólar -> Apenas Fato_fechamento_dolar
+    # 3. Dólar -> Fato_B3_dolar
     df_dolar = extrair_fechamento_dolar()
-    upsert_tabela_blindada(client, df_dolar, "Fato_fechamento_dolar", chaves=["data"])
+    upsert_tabela_blindada(client, df_dolar, "Fato_B3_dolar", chaves=["data"])
 
     logger.info("=" * 70)
-    logger.info("PIPELINE B3 FINALIZADO COM SUCESSO NO BIGQUERY (SEM REDUNDÂNCIAS)!")
+    logger.info("PIPELINE B3 FINALIZADO COM SUCESSO (PADRÃO OFICIAL: Fato_B3_*)!")
     logger.info("=" * 70)
 
 
