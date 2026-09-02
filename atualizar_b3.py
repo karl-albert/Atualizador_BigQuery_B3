@@ -278,7 +278,91 @@ def extrair_fechamento_dolar() -> pd.DataFrame:
 
 
 # ==============================================================================
-# 4. CARGA INCREMENTAL BLINDADA (TABELAS OFICIAIS Fato_B3_*)
+# 4. EXTRAÇÃO OFICIAL B3 - PARTICIPAÇÃO DOS INVESTIDORES (FLUXO DIÁRIO E MENSAL)
+# ==============================================================================
+def extrair_fluxo_investidores(dias_retroativos: int = 45) -> pd.DataFrame:
+    """
+    Extrai dados oficiais de Participação dos Investidores (Boletim Diário B3):
+    - Investidor Estrangeiro
+    - Institucionais
+    - Investidores Individuais (Pessoa Física)
+    - Instituições Financeiras
+    - Outros
+    """
+    logger.info("Extraindo Participação dos Investidores (Boletim Diário B3)...")
+    headers_bdi = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Origin": "https://arquivos.b3.com.br",
+        "Referer": "https://arquivos.b3.com.br/",
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/plain, */*",
+    }
+
+    dt_fim = datetime.now()
+    dt_ini = dt_fim - timedelta(days=dias_retroativos)
+
+    datas_uteis = []
+    curr = dt_ini
+    while curr <= dt_fim:
+        if curr.weekday() < 5:
+            datas_uteis.append(curr.strftime("%Y-%m-%d"))
+        curr += timedelta(days=1)
+
+    def fetch_flow_date(d_str):
+        url = f"https://drp.b3.com.br/bdi/table/SharesInvesVolum/{d_str}/{d_str}/1/100"
+        try:
+            r = requests.post(url, headers=headers_bdi, json={}, timeout=10)
+            if r.status_code == 200:
+                data = r.json()
+                table = data.get("table", {})
+                values = table.get("values", [])
+                if not values:
+                    return []
+                rows = []
+                for row in values:
+                    tipo = row[0]
+                    compras = row[1]
+                    part_compra = row[2]
+                    vendas = row[3]
+                    part_venda = row[4]
+                    saldo = (compras - vendas) if (compras is not None and vendas is not None) else None
+                    rows.append({
+                        "data": pd.to_datetime(d_str).date(),
+                        "tipo_investidor": str(tipo).strip(),
+                        "compras_mil": float(compras) if compras is not None else 0.0,
+                        "part_compra_pct": float(part_compra) if part_compra is not None else 0.0,
+                        "vendas_mil": float(vendas) if vendas is not None else 0.0,
+                        "part_venda_pct": float(part_venda) if part_venda is not None else 0.0,
+                        "saldo_liquido_mil": float(saldo) if saldo is not None else 0.0
+                    })
+                return rows
+        except Exception:
+            return []
+        return []
+
+    todas_linhas = []
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futuros = {executor.submit(fetch_flow_date, d): d for d in datas_uteis}
+        for f in futuros:
+            try:
+                res = f.result()
+                if res:
+                    todas_linhas.extend(res)
+            except Exception:
+                pass
+
+    if todas_linhas:
+        df = pd.DataFrame(todas_linhas)
+        df = df.drop_duplicates(subset=["data", "tipo_investidor"], keep="last")
+        df = df.sort_values(by=["data", "tipo_investidor"])
+        logger.info(f"Participação dos Investidores: {len(df)} registros coletados em {df['data'].nunique()} pregões.")
+        return df
+
+    return pd.DataFrame()
+
+
+# ==============================================================================
+# 5. CARGA INCREMENTAL BLINDADA (TABELAS OFICIAIS Fato_B3_*)
 # ==============================================================================
 def upsert_tabela_blindada(client: bigquery.Client, df_novos: pd.DataFrame, nome_tabela: str, chaves: list):
     """
@@ -326,7 +410,7 @@ def upsert_tabela_blindada(client: bigquery.Client, df_novos: pd.DataFrame, nome
 
 
 # ==============================================================================
-# 5. EXECUÇÃO PRINCIPAL
+# 6. EXECUÇÃO PRINCIPAL
 # ==============================================================================
 def main():
     logger.info("=" * 70)
@@ -346,6 +430,10 @@ def main():
     # 3. Dólar -> Fato_B3_dolar (5 anos de histórico)
     df_dolar = extrair_fechamento_dolar()
     upsert_tabela_blindada(client, df_dolar, "Fato_B3_dolar", chaves=["data"])
+
+    # 4. Fluxo de Investidores B3 -> Fato_Fluxo_Investidores_B3
+    df_investidores = extrair_fluxo_investidores(dias_retroativos=45)
+    upsert_tabela_blindada(client, df_investidores, "Fato_Fluxo_Investidores_B3", chaves=["data", "tipo_investidor"])
 
     logger.info("=" * 70)
     logger.info("PIPELINE B3 FINALIZADO COM 100% DE SUCESSO (HISTÓRICO COMPLETO 5 ANOS)!")
