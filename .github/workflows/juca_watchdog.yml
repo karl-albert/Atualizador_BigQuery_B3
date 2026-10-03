@@ -1,0 +1,48 @@
+name: Juca Supervisor · Watchdog & Auto-Recuperação
+
+on:
+  schedule:
+    # Roda a cada 20 minutos de segunda a sexta (07h às 23h BRT / 10h às 02h UTC)
+    - cron: '*/20 10-23,0-2 * * 1-5'
+  workflow_dispatch: # Permite disparo manual a qualquer momento
+
+jobs:
+  vigilancia-juca:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: 📥 Clonar Repositório
+        uses: actions/checkout@v4
+
+      - name: 🐍 Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 📦 Instalar Dependências
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: 🌐 Wakeup & Acionar Juca no Render Cloud
+        run: |
+          echo "Pinging Juca API no Render..."
+          curl -s -X POST https://meli-intelligence-bot.onrender.com/api/juca/monitor || true
+
+      - name: 👑 Executar Ciclo Autônomo do Juca Supervisor
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+          TEAMS_BOT_ID: ${{ secrets.TEAMS_BOT_ID || 'f476fb26-bade-47ba-8c15-af98cccf3b6b' }}
+          TEAMS_TENANT_ID: ${{ secrets.TEAMS_TENANT_ID || 'd62891e4-d7fd-4035-be5e-56f56edcc459' }}
+          TEAMS_CLIENT_SECRET: ${{ secrets.TEAMS_CLIENT_SECRET }}
+        run: |
+          python -c "
+          import juca_supervisor
+          rel = juca_supervisor.juca.executar_ciclo_vigilancia()
+          print('Ciclo Juca executado com sucesso!')
+          for r in rel:
+              print(f'• {r.get(\"nome\")}: {r.get(\"status\")} - {r.get(\"motivo\")}')
+          "
