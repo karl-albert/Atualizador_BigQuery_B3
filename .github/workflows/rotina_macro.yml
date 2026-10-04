@@ -2,8 +2,8 @@ name: Rotina Macroeconomia BigQuery
 
 on:
   schedule:
-    # Todo Sábado às 08:00 Horário de Brasília (11:00 UTC)
-    - cron: '0 11 * * 6'
+    # Todo Sábado às 08:10 Horário de Brasília (11:10 UTC)
+    - cron: '10 11 * * 6'
   workflow_dispatch: # Permite disparo manual a qualquer momento no GitHub Actions
 
 jobs:

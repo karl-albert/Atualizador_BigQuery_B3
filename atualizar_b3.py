@@ -282,93 +282,126 @@ def extrair_fechamento_dolar() -> pd.DataFrame:
 # ==============================================================================
 def extrair_fluxo_investidores(dias_retroativos: int = 45) -> pd.DataFrame:
     """
-    Extrai dados oficiais de Participação dos Investidores (Boletim Diário B3):
+    Extrai o fluxo diário líquido de investidores por categoria da B3 (série real diária, não cumulativa):
     - Investidor Estrangeiro
     - Institucionais
-    - Investidores Individuais (Pessoa Física)
+    - Investidores Individuais
     - Instituições Financeiras
     - Outros
     """
-    logger.info("Extraindo Participação dos Investidores (Boletim Diário B3)...")
-    headers_bdi = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Origin": "https://arquivos.b3.com.br",
-        "Referer": "https://arquivos.b3.com.br/",
-        "Content-Type": "application/json",
-        "Accept": "application/json, text/plain, */*",
+    logger.info("Extraindo Fluxo Diário Real de Investidores...")
+    url = "https://www.dadosdemercado.com.br/bolsa/investidores"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
     }
+    try:
+        r = requests.get(url, headers=headers, timeout=15)
+        if r.status_code == 200:
+            content = r.text
+            idx = content.find("const data = [")
+            if idx != -1:
+                start = content.find("[", idx)
+                decoder = json.JSONDecoder()
+                api_data, _ = decoder.raw_decode(content[start:])
 
-    dt_fim = datetime.now()
-    dt_ini = dt_fim - timedelta(days=dias_retroativos)
+                mapping = [
+                    ("foreigners", "Investidor Estrangeiro"),
+                    ("institutional", "Institucionais"),
+                    ("individuals", "Investidores Individuais"),
+                    ("financial_institutions", "Instituições Financeiras"),
+                    ("other", "Outros")
+                ]
 
-    datas_uteis = []
-    curr = dt_ini
-    while curr <= dt_fim:
-        if curr.weekday() < 5:
-            datas_uteis.append(curr.strftime("%Y-%m-%d"))
-        curr += timedelta(days=1)
-
-    def fetch_flow_date(d_str):
-        url = f"https://drp.b3.com.br/bdi/table/SharesInvesVolum/{d_str}/{d_str}/1/100"
-        try:
-            r = requests.post(url, headers=headers_bdi, json={}, timeout=10)
-            if r.status_code == 200:
-                data = r.json()
-                table = data.get("table", {})
-                values = table.get("values", [])
-                if not values:
-                    return []
                 rows = []
-                for row in values:
-                    tipo = row[0]
-                    compras = row[1]
-                    part_compra = row[2]
-                    vendas = row[3]
-                    part_venda = row[4]
-                    saldo = (compras - vendas) if (compras is not None and vendas is not None) else None
-                    rows.append({
-                        "data": pd.to_datetime(d_str).date(),
-                        "tipo_investidor": str(tipo).strip(),
-                        "compras_mil": float(compras) if compras is not None else 0.0,
-                        "part_compra_pct": float(part_compra) if part_compra is not None else 0.0,
-                        "vendas_mil": float(vendas) if vendas is not None else 0.0,
-                        "part_venda_pct": float(part_venda) if part_venda is not None else 0.0,
-                        "saldo_liquido_mil": float(saldo) if saldo is not None else 0.0
-                    })
-                return rows
-        except Exception:
-            return []
-        return []
+                for item in api_data:
+                    dt_str = item["date"]
+                    dt_val = datetime.strptime(dt_str, "%Y-%m-%d").date()
+                    for key, tipo in mapping:
+                        saldo = item.get(key)
+                        rows.append({
+                            "data": dt_val,
+                            "tipo_investidor": tipo,
+                            "compras_mil": None,
+                            "part_compra_pct": None,
+                            "vendas_mil": None,
+                            "part_venda_pct": None,
+                            "saldo_liquido_mil": float(saldo) if saldo is not None else None,
+                        })
 
-    todas_linhas = []
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        futuros = {executor.submit(fetch_flow_date, d): d for d in datas_uteis}
-        for f in futuros:
-            try:
-                res = f.result()
-                if res:
-                    todas_linhas.extend(res)
-            except Exception:
-                pass
-
-    if todas_linhas:
-        df = pd.DataFrame(todas_linhas)
-        df = df.drop_duplicates(subset=["data", "tipo_investidor"], keep="last")
-        df = df.sort_values(by=["data", "tipo_investidor"])
-        logger.info(f"Participação dos Investidores: {len(df)} registros coletados em {df['data'].nunique()} pregões.")
-        return df
+                df = pd.DataFrame(rows)
+                df = df.drop_duplicates(subset=["data", "tipo_investidor"], keep="last")
+                df = df.sort_values(by=["data", "tipo_investidor"])
+                logger.info(f"Fluxo de Investidores: {len(df)} registros coletados em {df['data'].nunique()} pregões.")
+                return df
+    except Exception as e:
+        logger.error(f"Erro ao extrair fluxo de investidores: {e}")
 
     return pd.DataFrame()
 
 
 # ==============================================================================
-# 5. CARGA INCREMENTAL BLINDADA (TABELAS OFICIAIS Fato_B3_*)
+# 5. EXTRAÇÃO DE ÍNDICES INTERNACIONAIS (SÉRIE HISTÓRICA 2 ANOS)
+# ==============================================================================
+def extrair_indices_internacionais() -> pd.DataFrame:
+    """Extrai cotações de índices americanos e internacionais (Dow Jones, Nasdaq, NYSE, Brent, OMX)."""
+    indices_meta = [
+        {"ticker": "^DJI", "indice": "Dow Jones Industrial Average", "bolsa": "DJI"},
+        {"ticker": "^IXIC", "indice": "NASDAQ Composite", "bolsa": "NIM"},
+        {"ticker": "^NYA", "indice": "NYSE Composite Index", "bolsa": "NYS"},
+        {"ticker": "^NQGS", "indice": "NASDAQ Global Select Market Com", "bolsa": "NIM"},
+        {"ticker": "BZ=F", "indice": "Brent Crude Oil", "bolsa": "ICE"},
+        {"ticker": "^OMX", "indice": "OMX Stockholm 30 Index", "bolsa": "STO"}
+    ]
+    all_rows = []
+    for item in indices_meta:
+        tk = item["ticker"]
+        ind = item["indice"]
+        bolsa = item["bolsa"]
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{tk}?range=2y&interval=1d"
+        try:
+            r = requests.get(url, headers=HEADERS_REQ, timeout=15)
+            if r.status_code == 200:
+                res = r.json().get("chart", {}).get("result", [])
+                if res:
+                    timestamps = res[0].get("timestamp", [])
+                    quotes = res[0].get("indicators", {}).get("quote", [{}])[0]
+                    closes = quotes.get("close", [])
+                    highs = quotes.get("high", [])
+                    lows = quotes.get("low", [])
+                    volumes = quotes.get("volume", [])
+                    for ts, c, h, l, v in zip(timestamps, closes, highs, lows, volumes):
+                        if c is not None:
+                            d_dt = datetime.fromtimestamp(ts).date()
+                            all_rows.append({
+                                "Data_Coleta": d_dt,
+                                "Indice": ind,
+                                "Ticker": tk,
+                                "Bolsa": bolsa,
+                                "Preco_Maximo": round(float(h), 4) if h is not None else round(float(c), 4),
+                                "Preco_Minimo": round(float(l), 4) if l is not None else round(float(c), 4),
+                                "Preco_Fechamento": round(float(c), 4),
+                                "Volume": int(v) if (v is not None and not pd.isna(v)) else 0
+                            })
+        except Exception as e:
+            logger.warning(f"Erro ao extrair índice {ind} ({tk}): {e}")
+
+    df = pd.DataFrame(all_rows)
+    if not df.empty:
+        df["Data_Coleta"] = pd.to_datetime(df["Data_Coleta"]).dt.date
+        df = df.drop_duplicates(subset=["Data_Coleta", "Ticker"], keep="last")
+        logger.info(f"Índices Internacionais: {len(df)} registros consolidados para {df['Ticker'].nunique()} índices.")
+    return df
+
+
+# ==============================================================================
+# 6. CARGA INCREMENTAL BLINDADA (TABELAS OFICIAIS Fato_B3_* e Fato_Indices_*)
 # ==============================================================================
 def upsert_tabela_blindada(client: bigquery.Client, df_novos: pd.DataFrame, nome_tabela: str, chaves: list):
     """
     Carga consolidada blindada:
     1. Lê base existente (se houver).
-    2. Consolida com histórico novo de 5 anos e desduplica pelas chaves.
+    2. Consolida com histórico novo e desduplica pelas chaves.
     3. Trata colunas e timestamps de forma consistente.
     4. Grava na tabela oficial do BigQuery.
     """
@@ -384,8 +417,12 @@ def upsert_tabela_blindada(client: bigquery.Client, df_novos: pd.DataFrame, nome
         df_existente = client.query(query).to_dataframe()
         if "data" in df_existente.columns:
             df_existente["data"] = pd.to_datetime(df_existente["data"]).dt.date
+        if "Data_Coleta" in df_existente.columns:
+            df_existente["Data_Coleta"] = pd.to_datetime(df_existente["Data_Coleta"]).dt.date
         if "volume" in df_existente.columns:
             df_existente["volume"] = pd.to_numeric(df_existente["volume"], errors="coerce").fillna(0).astype("int64")
+        if "Volume" in df_existente.columns:
+            df_existente["Volume"] = pd.to_numeric(df_existente["Volume"], errors="coerce").fillna(0).astype("int64")
             
         qtd_existente = len(df_existente)
         df_consolidado = pd.concat([df_existente, df_novos], ignore_index=True)
@@ -398,10 +435,11 @@ def upsert_tabela_blindada(client: bigquery.Client, df_novos: pd.DataFrame, nome
 
     if "criado_em" in df_consolidado.columns:
         df_consolidado["criado_em"] = pd.to_datetime(df_consolidado["criado_em"]).fillna(now)
-    else:
+    elif "criado_em" in df_novos.columns:
         df_consolidado["criado_em"] = now
 
-    df_consolidado["atualizado_em"] = now
+    if "atualizado_em" in df_consolidado.columns or "criado_em" in df_consolidado.columns:
+        df_consolidado["atualizado_em"] = now
 
     job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
     logger.info(f"Carregando {qtd_consolidada} registros em '{tabela_destino}'...")
@@ -410,7 +448,7 @@ def upsert_tabela_blindada(client: bigquery.Client, df_novos: pd.DataFrame, nome
 
 
 # ==============================================================================
-# 6. EXECUÇÃO PRINCIPAL
+# 7. EXECUÇÃO PRINCIPAL
 # ==============================================================================
 def main():
     logger.info("=" * 70)
@@ -434,6 +472,10 @@ def main():
     # 4. Fluxo de Investidores B3 -> Fato_Fluxo_Investidores_B3
     df_investidores = extrair_fluxo_investidores(dias_retroativos=45)
     upsert_tabela_blindada(client, df_investidores, "Fato_Fluxo_Investidores_B3", chaves=["data", "tipo_investidor"])
+
+    # 5. Índices Internacionais -> Fato_Indices_Americanos (Dow Jones, Nasdaq, NYSE, Brent, OMX)
+    df_indices = extrair_indices_internacionais()
+    upsert_tabela_blindada(client, df_indices, "Fato_Indices_Americanos", chaves=["Data_Coleta", "Ticker"])
 
     logger.info("=" * 70)
     logger.info("PIPELINE B3 FINALIZADO COM 100% DE SUCESSO (HISTÓRICO COMPLETO 5 ANOS)!")

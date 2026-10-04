@@ -44,9 +44,9 @@ PIPELINES = [
         "tag": "B3 Ações",
         "repo": "karl-albert/Atualizador_BigQuery_B3",
         "wf": "rotina_b3.yml",
-        "cron_desc": "Seg a Sex às 10h30, 14h30 e 18h30 (BRT)",
-        "tolerance_min": 25,
-        "times": [(10, 30), (14, 30), (18, 30)],
+        "cron_desc": "Seg a Sex às 10h40, 14h40 e 18h40 (BRT)",
+        "tolerance_min": 10,
+        "times": [(10, 40), (14, 40), (18, 40)],
         "weekdays": [0, 1, 2, 3, 4] # Seg a Sex
     },
     {
@@ -55,9 +55,9 @@ PIPELINES = [
         "tag": "B3 Macro",
         "repo": "karl-albert/Atualizador_BigQuery_B3",
         "wf": "rotina_macro.yml",
-        "cron_desc": "Sábados às 08h00 (BRT)",
-        "tolerance_min": 60,
-        "times": [(8, 0)],
+        "cron_desc": "Sábados às 08h10 (BRT)",
+        "tolerance_min": 10,
+        "times": [(8, 10)],
         "weekdays": [5] # Sábado
     },
     {
@@ -412,20 +412,26 @@ class JucaSupervisor:
             incidente_ativo = incidentes.get(pid)
 
             # Caso 1: Tudo Verde e Normal
+            # Caso 1: Tudo Verde e Normal
             if status == "VERDE":
-                if incidente_ativo and incidente_ativo.get("status") in ["AUTO_HEALING_DISPARADO", "ESCALONADO"]:
-                    titulo = f"🟢 **[JUCA SUPERVISOR] Auto-Recuperação Concluída com Sucesso!**"
-                    msg = (
-                        f"Olá Karl! O pipeline **{nome}** foi restabelecido e concluiu com 100% de êxito!\n\n"
-                        f"✅ **Ação que tomei:** Acionei o botão de disparo manual no GitHub Actions.\n"
-                        f"📊 **Status:** Os dados foram carregados no BigQuery e o ecossistema dos 3 Jocas continua 100% operacional."
-                    )
-                    self.enviar_alerta_teams(titulo, msg, severity="success", url_run=url_run)
+                if incidente_ativo and incidente_ativo.get("status") in ["AUTO_HEALING_DISPARADO", "AUTO_HEALING_EM_ANDAMENTO", "ESCALONADO"]:
+                    qtd_tentativas = incidente_ativo.get("tentativas", 1)
+                    if incidente_ativo.get("escalonado_karl"):
+                        # Se Karl já havia sido chamado no Teams, avisa que normalizou com sucesso
+                        titulo = f"🟢 **[JUCA SUPERVISOR] Auto-Recuperação Concluída com Sucesso!**"
+                        msg = (
+                            f"Olá Karl! O pipeline **{nome}** foi restabelecido e concluiu com 100% de êxito!\n\n"
+                            f"✅ **Ação tomada:** Foram realizadas {qtd_tentativas} tentativa(s) de reexecução no GitHub Actions.\n"
+                            f"📊 **Status:** Os dados foram consolidados no BigQuery e o ecossistema continua 100% operacional."
+                        )
+                        self.enviar_alerta_teams(titulo, msg, severity="success", url_run=url_run)
+                    
+                    logger.info(f"[JUCA SUCESSO] Pipeline {nome} restabelecido após {qtd_tentativas} tentativa(s).")
                     historico.append({
                         "data_hora": agora.strftime("%Y-%m-%d %H:%M:%S"),
                         "pipeline": pid,
                         "evento": "RECUPERADO_SUCESSO",
-                        "detalhe": "Pipeline voltou ao status VERDE após ação do Juca."
+                        "detalhe": f"Pipeline voltou ao status VERDE após {qtd_tentativas} tentativa(s) do Juca."
                     })
                     del incidentes[pid]
                     houve_alteracao = True
@@ -439,22 +445,64 @@ class JucaSupervisor:
 
             # Caso 3: Detecção de Falha ou Atraso (Amarelo ou Vermelho)
             if status in ["AMARELO_ATRASO", "VERMELHO_FALHA"]:
-                pode_disparar_cura = True
-                if incidente_ativo:
-                    tentativa_dt = datetime.fromisoformat(incidente_ativo["primeiro_disparo"])
-                    passaram_minutos = (agora - tentativa_dt).total_seconds() / 60
+                if not incidente_ativo:
+                    # Primeira detecção: Tentativa 1 de 4 de auto-recuperação
+                    logger.info(f"[JUCA AUTO-HEAL] Iniciando auto-recuperação autônoma para {nome} (Tentativa 1/4)...")
+                    sucesso_disp, msg_disp = self.disparar_workflow_botao(repo, wf)
+                    
+                    incidentes[pid] = {
+                        "pipeline": pid,
+                        "nome": nome,
+                        "motivo_original": motivo,
+                        "primeiro_disparo": agora.isoformat(),
+                        "ultimo_disparo": agora.isoformat(),
+                        "tentativas": 1,
+                        "max_tentativas": 4,
+                        "status": "AUTO_HEALING_EM_ANDAMENTO",
+                        "disparo_sucesso": sucesso_disp,
+                        "escalonado_karl": False
+                    }
+                    historico.append({
+                        "data_hora": agora.strftime("%Y-%m-%d %H:%M:%S"),
+                        "pipeline": pid,
+                        "evento": "AUTO_HEAL_TENTATIVA_1",
+                        "detalhe": f"Juca disparou tentativa 1/4 de {wf} após detectar {motivo}"
+                    })
+                    houve_alteracao = True
+                else:
+                    # Incidente já em andamento: aguarda intervalo entre tentativas antes de disparar a próxima
+                    if not incidente_ativo.get("escalonado_karl"):
+                        ultimo_dt_str = incidente_ativo.get("ultimo_disparo") or incidente_ativo.get("primeiro_disparo")
+                        tentativa_dt = datetime.fromisoformat(ultimo_dt_str)
+                        passaram_minutos = (agora - tentativa_dt).total_seconds() / 60
+                        tentativas_atuais = incidente_ativo.get("tentativas", 1)
 
-                    if incidente_ativo.get("status") == "AUTO_HEALING_DISPARADO":
-                        if passaram_minutos >= 15:
-                            # A auto-recuperação FALHOU! Escalonamento Nível 2 (Chamar o Karl no Teams)
-                            if not incidente_ativo.get("escalonado_karl"):
-                                titulo = f"🚨 **[JUCA SUPERVISOR] Atenção Karl · Intervenção Manual Necessária!**"
+                        if passaram_minutos >= 10:
+                            if tentativas_atuais < 4:
+                                tentativas_atuais += 1
+                                logger.info(f"[JUCA AUTO-HEAL] Reexecutando auto-recuperação para {nome} (Tentativa {tentativas_atuais}/4)...")
+                                sucesso_disp, msg_disp = self.disparar_workflow_botao(repo, wf)
+                                incidente_ativo["tentativas"] = tentativas_atuais
+                                incidente_ativo["ultimo_disparo"] = agora.isoformat()
+                                incidente_ativo["status"] = "AUTO_HEALING_EM_ANDAMENTO"
+                                historico.append({
+                                    "data_hora": agora.strftime("%Y-%m-%d %H:%M:%S"),
+                                    "pipeline": pid,
+                                    "evento": f"AUTO_HEAL_TENTATIVA_{tentativas_atuais}",
+                                    "detalhe": f"Juca disparou tentativa {tentativas_atuais}/4 de {wf} após persistência de {motivo}"
+                                })
+                                houve_alteracao = True
+                            else:
+                                # Já foram 4 tentativas que NÃO DERAM CERTO! Escalonamento Nível 2 (Chama Karl no Teams)
+                                logger.warning(f"[JUCA ESCALONAMENTO] 4 tentativas falharam para {nome}! Chamando Karl no Teams...")
+                                primeiro_dt = datetime.fromisoformat(incidente_ativo["primeiro_disparo"])
+                                titulo = f"🚨 **[JUCA SUPERVISOR] Atenção Karl · 4 Tentativas Falharam!**"
                                 msg = (
                                     f"Karl, preciso da sua entrada no circuito!\n\n"
-                                    f"⚠️ **Problema:** A rotina **{nome}** apresentou falha / atraso persistente ({motivo}).\n"
-                                    f"🛠️ **Medida que eu (Juca) já tomei:** Eu apertei o botão e disparei a atualização manual no GitHub Actions às {tentativa_dt.strftime('%H:%M:%S')}.\n"
-                                    f"❌ **Resultado:** A nova execução não concluiu com sucesso ou falhou novamente. Minha auto-recuperação não surtiu efeito!\n"
-                                    f"👨‍💻 **Ação Requerida:** Você precisa entrar no circuito para inspecionar os logs de execução, credenciais ou conexões externas."
+                                    f"⚠️ **Problema:** A rotina **{nome}** apresentou falha ou atraso persistente ({motivo}).\n"
+                                    f"🛠️ **Medida tomada pelo Juca:** Esgotei as **4 tentativas automáticas** de reexecução no GitHub Actions (iniciadas às {primeiro_dt.strftime('%H:%M:%S')}).\n"
+                                    f"❌ **Resultado:** Todas as 4 tentativas não deram certo ou falharam. Minha auto-recuperação esgotou o limite de segurança!\n"
+                                    f"👨‍💻 **Ação Requerida:** Por favor, verifique o repositório, credenciais ou conexões externas."
                                 )
                                 self.enviar_alerta_teams(titulo, msg, severity="danger", url_run=url_run)
                                 incidente_ativo["escalonado_karl"] = True
@@ -463,43 +511,9 @@ class JucaSupervisor:
                                     "data_hora": agora.strftime("%Y-%m-%d %H:%M:%S"),
                                     "pipeline": pid,
                                     "evento": "ESCALONADO_KARL",
-                                    "detalhe": "Auto-cura tentada sem sucesso. Karl chamado no Teams."
+                                    "detalhe": "Auto-recuperação tentada 4 vezes sem sucesso. Karl chamado no Teams."
                                 })
                                 houve_alteracao = True
-                        pode_disparar_cura = False
-                    elif incidente_ativo.get("status") == "ESCALONADO":
-                        pode_disparar_cura = False
-
-                # Nível 1: Primeira tentativa de Auto-Recuperação (Juca aperta o botão)
-                if pode_disparar_cura:
-                    logger.info(f"[JUCA AUTO-HEAL] Iniciando auto-recuperação autônoma para {nome}...")
-                    sucesso_disp, msg_disp = self.disparar_workflow_botao(repo, wf)
-                    
-                    titulo = f"🟡 **[JUCA SUPERVISOR] Auto-Recuperação Acionada**"
-                    msg = (
-                        f"Olá Karl! Detectei que a rotina **{nome}** estava pendente / em atraso.\n\n"
-                        f"📋 **Diagnóstico:** {motivo}\n"
-                        f"⚡ **Medida Tomada:** Eu já acionei o botão de atualização manual (disparo via GitHub Actions) às {agora.strftime('%H:%M:%S')}.\n"
-                        f"⏳ **Status:** Execução iniciada. Estou acompanhando o andamento e te aviso se tudo correr bem ou se precisarmos de você!"
-                    )
-                    self.enviar_alerta_teams(titulo, msg, severity="warning", url_run=url_run)
-
-                    incidentes[pid] = {
-                        "pipeline": pid,
-                        "nome": nome,
-                        "motivo_original": motivo,
-                        "primeiro_disparo": agora.isoformat(),
-                        "status": "AUTO_HEALING_DISPARADO",
-                        "disparo_sucesso": sucesso_disp,
-                        "escalonado_karl": False
-                    }
-                    historico.append({
-                        "data_hora": agora.strftime("%Y-%m-%d %H:%M:%S"),
-                        "pipeline": pid,
-                        "evento": "AUTO_HEAL_DISPARADO",
-                        "detalhe": f"Juca disparou {wf} após detectar {motivo}"
-                    })
-                    houve_alteracao = True
 
                 relatorio.append({"id": pid, "nome": nome, "status": f"PROBLEMA_{status}", "motivo": motivo})
 
