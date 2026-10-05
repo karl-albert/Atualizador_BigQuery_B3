@@ -477,10 +477,101 @@ def main():
     df_indices = extrair_indices_internacionais()
     upsert_tabela_blindada(client, df_indices, "Fato_Indices_Americanos", chaves=["Data_Coleta", "Ticker"])
 
+    # 6. Sincronização Automática com o Robô Joca B3 no Render (Zero-Click)
+    try:
+        sincronizar_com_joca_b3(client, df_tickers, df_ibov, df_dolar, df_investidores, df_indices)
+    except Exception as e_sync:
+        logger.warning(f"Aviso ao sincronizar com o Joca B3: {e_sync}")
+
     logger.info("=" * 70)
     logger.info("PIPELINE B3 FINALIZADO COM 100% DE SUCESSO (HISTÓRICO COMPLETO 5 ANOS)!")
     logger.info("=" * 70)
 
 
+def sincronizar_com_joca_b3(client, df_tickers, df_ibov, df_dolar, df_investidores, df_indices):
+    """
+    Sincroniza automaticamente a base da B3 com o Joca B3 no Render (24/7).
+    Executado no final do pipeline no GitHub Actions para garantir ZERO-CLICK.
+    """
+    logger.info("=" * 70)
+    logger.info("INICIANDO SINCRONIZAÇÃO AUTOMÁTICA B3 -> JOCA NUVEM (RENDER)")
+    logger.info("=" * 70)
+
+    duckdb_file = os.path.join(os.path.dirname(__file__), "b3_database_sync.duckdb")
+    if os.path.exists(duckdb_file):
+        try:
+            os.remove(duckdb_file)
+        except Exception:
+            pass
+
+    try:
+        import duckdb
+        con = duckdb.connect(duckdb_file)
+
+        # 1. Tabelas de Fato recém-coletadas
+        if df_tickers is not None and not df_tickers.empty:
+            con.execute("CREATE TABLE fato_b3_tickers AS SELECT * FROM df_tickers WHERE data >= '2026-01-01'")
+            logger.info(f" -> fato_b3_tickers: {con.execute('SELECT count(*) FROM fato_b3_tickers').fetchone()[0]} linhas")
+
+        if df_ibov is not None and not df_ibov.empty:
+            con.execute("CREATE TABLE fato_b3_ibov AS SELECT * FROM df_ibov")
+            logger.info(f" -> fato_b3_ibov: {con.execute('SELECT count(*) FROM fato_b3_ibov').fetchone()[0]} linhas")
+
+        if df_dolar is not None and not df_dolar.empty:
+            con.execute("CREATE TABLE fato_b3_dolar AS SELECT * FROM df_dolar")
+            logger.info(f" -> fato_b3_dolar: {con.execute('SELECT count(*) FROM fato_b3_dolar').fetchone()[0]} linhas")
+
+        if df_investidores is not None and not df_investidores.empty:
+            con.execute("CREATE TABLE fato_fluxo_investidores_b3 AS SELECT * FROM df_investidores")
+            logger.info(f" -> fato_fluxo_investidores_b3: {con.execute('SELECT count(*) FROM fato_fluxo_investidores_b3').fetchone()[0]} linhas")
+
+        if df_indices is not None and not df_indices.empty:
+            con.execute("CREATE TABLE fato_indices_americanos AS SELECT * FROM df_indices")
+            logger.info(f" -> fato_indices_americanos: {con.execute('SELECT count(*) FROM fato_indices_americanos').fetchone()[0]} linhas")
+
+        # 2. Tabelas Dimensionais e Macro do BigQuery
+        dim_macro_tables = [
+            ("Dim_Ativos", "dim_ativos"),
+            ("Dim_Ativos_Board", "dim_ativos_board"),
+            ("Fato_Macro_Diarios", "fato_macro_diarios"),
+            ("Fato_macro_Mensais", "fato_macro_mensais"),
+            ("Fato_macro_Trimestrais", "fato_macro_trimestrais")
+        ]
+
+        for bq_tbl, duck_tbl in dim_macro_tables:
+            try:
+                df_aux = client.query(f"SELECT * FROM `{GCP_PROJECT_ID}.{DATASET_ID}.{bq_tbl}`").to_dataframe()
+                con.execute(f"CREATE TABLE {duck_tbl} AS SELECT * FROM df_aux")
+                logger.info(f" -> {duck_tbl}: {len(df_aux)} linhas importadas do BigQuery")
+            except Exception as e_aux:
+                logger.warning(f"Aviso ao carregar {bq_tbl}: {e_aux}")
+
+        con.close()
+
+        # 3. Enviar para a API do Render via POST
+        sync_secret = os.environ.get("RENDER_SYNC_SECRET", "meli_joca_sync_2026_karl")
+        url_sync = f"https://meli-intelligence-bot.onrender.com/sync_data?secret={sync_secret}&target=b3"
+        size_mb = os.path.getsize(duckdb_file) / (1024 * 1024)
+        logger.info(f"Enviando base compilada ({size_mb:.2f} MB) para o Joca B3 no Render...")
+
+        with open(duckdb_file, "rb") as f:
+            resp = requests.post(url_sync, files={"file": f}, timeout=120)
+
+        if resp.status_code == 200:
+            logger.info(f"✅ [SUCESSO JOCA B3] Robô atualizado automaticamente na nuvem! Resposta: {resp.text}")
+        else:
+            logger.warning(f"⚠️ [AVISO JOCA B3] Render retornou status {resp.status_code}: {resp.text}")
+
+    except Exception as e:
+        logger.error(f"Erro na sincronização automática do Joca B3: {e}")
+    finally:
+        if os.path.exists(duckdb_file):
+            try:
+                os.remove(duckdb_file)
+            except Exception:
+                pass
+
+
 if __name__ == "__main__":
     main()
+

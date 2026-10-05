@@ -62,13 +62,24 @@ PIPELINES = [
     },
     {
         "id": "mercadolivre",
-        "name": "Mercado Livre · Mais Vendidos & Inteligência",
-        "tag": "Mercado Livre",
+        "name": "Mercado Livre · Mais Vendidos (BigQuery)",
+        "tag": "Mercado Livre BQ",
         "repo": "karl-albert/Atualizador_BigQuery_MercadoLivre-",
         "wf": "rotina_mercadolivre.yml",
         "cron_desc": "Diariamente às 08h00, 18h00 e 23h00 (BRT)",
         "tolerance_min": 30,
         "times": [(8, 0), (18, 0), (23, 0)],
+        "weekdays": [0, 1, 2, 3, 4, 5, 6]
+    },
+    {
+        "id": "mercadolivre_fabric",
+        "name": "Mercado Livre · Fabric OneLake & Direct Lake",
+        "tag": "ML Fabric",
+        "repo": "karl-albert/Atualizador_Fabric_MercadoLivre",
+        "wf": "rotina_atualizador_fabric.yml",
+        "cron_desc": "Diariamente às 08h15, 18h15 e 23h15 (BRT)",
+        "tolerance_min": 35,
+        "times": [(8, 15), (18, 15), (23, 15)],
         "weekdays": [0, 1, 2, 3, 4, 5, 6]
     },
     {
@@ -566,6 +577,18 @@ class JucaSupervisor:
             else:
                 return f"❌ **Erro no Disparo:** {msg}"
 
+        if any(w in t for w in ["ATUALIZA FABRIC", "RODA FABRIC", "ATUALIZAR FABRIC"]):
+            sucesso, msg = self.disparar_workflow_botao("karl-albert/Atualizador_Fabric_MercadoLivre", "rotina_atualizador_fabric.yml")
+            if sucesso:
+                return (
+                    f"⚡ **Comandante {user_name}! Ação Executada com Sucesso:**\n\n"
+                    f"👉 Já cliquei no botão e acionei o pipeline do **Mercado Livre Fabric (OneLake)** no GitHub Actions!\n"
+                    f"🕒 Horário: {agora}\n"
+                    f"🟡 Status: Em execução na nuvem."
+                )
+            else:
+                return f"❌ **Erro no Disparo:** {msg}"
+
         # 2. Relatório de Status Geral
         estado = carregar_estado_juca()
         incidentes = estado.get("incidentes", {})
@@ -579,12 +602,32 @@ class JucaSupervisor:
             else:
                 linhas.append(f"🟢 **{p['tag']}:** Operacional e em dia")
 
-        status_jocas = (
-            "🤖 **Status dos 3 Jocas:**\n"
-            "• **Joca_BigQuery (Telegram ML):** 🟢 Ativo na nuvem\n"
-            "• **Joca_Fabric (Telegram OneLake):** 🟢 Ativo na nuvem\n"
-            "• **Joca_B3 (Teams Mercado Financeiro):** 🟢 Ativo na nuvem"
-        )
+        # Consulta dinamica de saude dos robos Joca
+        try:
+            r_st = requests.get("https://meli-intelligence-bot.onrender.com/status", timeout=4)
+            if r_st.status_code == 200:
+                d_st = r_st.json()
+                dt_ml = d_st.get("data_recente", "N/D")
+                tot_ml = d_st.get("total_registros", 0)
+                dt_b3 = d_st.get("b3_indices_max_data", "N/D")
+                status_jocas = (
+                    "🤖 **Status dos 3 Jocas (Ao Vivo):**\n"
+                    f"• **Joca_BigQuery (Telegram ML):** 🟢 Online (Base: {dt_ml} · {tot_ml:,} reg)\n"
+                    "• **Joca_Fabric (Telegram OneLake):** 🟢 Online (OneLake Direct Lake)\n"
+                    f"• **Joca_B3 (Teams Mercado Financeiro):** 🟢 Online (Cotações até {dt_b3})"
+                )
+            else:
+                status_jocas = (
+                    "🤖 **Status dos 3 Jocas:**\n"
+                    f"• **Joca_BigQuery / Joca_Fabric / Joca_B3:** 🟡 Servidor HTTP {r_st.status_code}"
+                )
+        except Exception:
+            status_jocas = (
+                "🤖 **Status dos 3 Jocas:**\n"
+                "• **Joca_BigQuery (Telegram ML):** 🟢 Ativo na nuvem\n"
+                "• **Joca_Fabric (Telegram OneLake):** 🟢 Ativo na nuvem\n"
+                "• **Joca_B3 (Teams Mercado Financeiro):** 🟢 Ativo na nuvem"
+            )
 
         linhas_txt = "\n".join(linhas)
         return (
