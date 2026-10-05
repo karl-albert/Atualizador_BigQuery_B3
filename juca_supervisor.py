@@ -47,7 +47,7 @@ PIPELINES = [
         "cron_desc": "Seg a Sex às 10h40, 14h40 e 18h40 (BRT)",
         "tolerance_min": 10,
         "times": [(10, 40), (14, 40), (18, 40)],
-        "weekdays": [0, 1, 2, 3, 4] # Seg a Sex
+        "weekdays": [0, 1, 2, 3, 4]
     },
     {
         "id": "macro",
@@ -58,7 +58,7 @@ PIPELINES = [
         "cron_desc": "Sábados às 08h10 (BRT)",
         "tolerance_min": 10,
         "times": [(8, 10)],
-        "weekdays": [5] # Sábado
+        "weekdays": [5]
     },
     {
         "id": "mercadolivre",
@@ -76,10 +76,10 @@ PIPELINES = [
         "name": "Mercado Americano · US Stocks & Macro FRED",
         "tag": "US Markets",
         "repo": "karl-albert/Atualizador_BigQuery_Americans",
-        "wf": "cron.yml",
+        "wf": "cron.yml", # ⚠️ Confirme se no GitHub deste repo o arquivo não se chama 'rotina_americans.yml' ou similar
         "cron_desc": "Seg a Sex de hora em hora (:00 BRT)",
         "tolerance_min": 25,
-        "times": [(h, 0) for h in range(9, 19)], # Horário comercial
+        "times": [(h, 0) for h in range(9, 19)],
         "weekdays": [0, 1, 2, 3, 4]
     },
     {
@@ -94,7 +94,6 @@ PIPELINES = [
         "weekdays": [0, 1, 2, 3, 4, 5, 6]
     }
 ]
-
 
 def obter_github_token_sistema():
     """Obtém o token do GitHub por variáveis de ambiente ou Git Credential Manager."""
@@ -193,11 +192,13 @@ class JucaSupervisor:
     def obter_github_headers(self):
         headers = {
             "Accept": "application/vnd.github+json",
-            "User-Agent": "Juca-Supervisor-Bot"
+            "User-Agent": "Juca-Supervisor-Bot",
+            "X-GitHub-Api-Version": "2022-11-28"
         }
         tok = self.token_github
         if tok:
-            headers["Authorization"] = f"token {tok}"
+            # Modificado de 'token {tok}' para 'Bearer {tok}' que é o padrão correto
+            headers["Authorization"] = f"Bearer {tok}"
         return headers
 
     def consultar_runs(self, repo, wf_file, per_page=10):
