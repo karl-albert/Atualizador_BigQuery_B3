@@ -27,6 +27,7 @@ import logging
 import threading
 import subprocess
 from datetime import datetime, date, timezone, timedelta
+import re
 import requests
 
 logger = logging.getLogger("JucaSupervisor")
@@ -353,6 +354,13 @@ class JucaSupervisor:
                     resultado["teste_sintetico_b3_acoes_ok"] = True
                     linhas_b3 = [l.strip() for l in corpo_b3.split("\n") if l.strip()]
                     resultado["teste_sintetico_b3_acoes_resumo"] = linhas_b3[0] if linhas_b3 else "OK"
+                    if not resultado.get("data_recente_b3_acoes"):
+                        m_dt = re.search(r'(\d{2}/\d{2}/\d{4})', corpo_b3)
+                        if m_dt:
+                            try:
+                                resultado["data_recente_b3_acoes"] = datetime.strptime(m_dt.group(1), "%d/%m/%Y").strftime("%Y-%m-%d")
+                            except Exception:
+                                pass
                 else:
                     resultado["anomalias"].append("Teste sintético de Ações B3 (PETR4) retornou resposta incompleta")
             else:
@@ -369,6 +377,13 @@ class JucaSupervisor:
                     resultado["teste_sintetico_dow_jones_ok"] = True
                     linhas_eua = [l.strip() for l in corpo_eua.split("\n") if l.strip()]
                     resultado["teste_sintetico_dow_jones_resumo"] = linhas_eua[0] if linhas_eua else "OK"
+                    if not resultado.get("data_recente_indices_eua"):
+                        m_dt = re.search(r'(\d{2}/\d{2}/\d{4})', corpo_eua)
+                        if m_dt:
+                            try:
+                                resultado["data_recente_indices_eua"] = datetime.strptime(m_dt.group(1), "%d/%m/%Y").strftime("%Y-%m-%d")
+                            except Exception:
+                                pass
                 else:
                     resultado["anomalias"].append("Teste sintético de Índices EUA (Dow Jones) retornou resposta incompleta")
             else:
