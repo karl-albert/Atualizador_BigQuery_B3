@@ -2,8 +2,8 @@ name: Juca Supervisor · Watchdog & Auto-Recuperação
 
 on:
   schedule:
-    # Roda a cada 20 minutos de segunda a sexta (07h às 23h BRT / 10h às 02h UTC)
-    - cron: '*/20 10-23,0-2 * * 1-5'
+    # Roda a cada 15 minutos (07h às 23h BRT / 10h às 02h UTC) todos os dias - Anti-Hibernação Keep-Alive & SRE Watchdog
+    - cron: '*/15 10-23,0-2 * * *'
   workflow_dispatch: # Permite disparo manual a qualquer momento
 
 jobs:
@@ -26,12 +26,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
 
-      - name: 🌐 Wakeup & Acionar Juca no Render Cloud
+      - name: 🌐 Wakeup & Acionar Juca no Render Cloud (Keep-Alive)
         run: |
-          echo "Pinging Juca API no Render..."
+          echo "Pinging Juca API no Render para manter vivo e acionar ciclo..."
           curl -s -X POST https://meli-intelligence-bot.onrender.com/api/juca/monitor || true
 
-      - name: 👑 Executar Ciclo Autônomo do Juca Supervisor
+      - name: 👑 Executar Ciclo Autônomo e Raio-X do Juca Supervisor
         env:
           GITHUB_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
           TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
@@ -41,8 +41,21 @@ jobs:
         run: |
           python -c "
           import juca_supervisor
+          print('=== [JUCA] INICIANDO CICLO DE VIGILÂNCIA SRE ===')
           rel = juca_supervisor.juca.executar_ciclo_vigilancia()
-          print('Ciclo Juca executado com sucesso!')
+          print('Ciclo de vigilância executado!')
           for r in rel:
               print(f'• {r.get(\"nome\")}: {r.get(\"status\")} - {r.get(\"motivo\")}')
+          
+          print('\n=== [JUCA] RAIO-X OPERACIONAL PROFUNDO ===')
+          diag = juca_supervisor.juca.diagnosticar_problemas_profundo()
+          print(f'Status Geral: {diag[\"status_geral\"]}')
+          print(f'Render Online: {diag[\"infra_render\"][\"online\"]} ({diag[\"infra_render\"][\"latencia_ms\"]}ms)')
+          print(f'Webhooks Telegram: {diag[\"webhooks_telegram\"]}')
+          print(f'Frescor Dados: {diag[\"frescor_dados\"]}')
+          print(f'Teste Sintético Dow Jones: {diag[\"teste_sintetico\"]}')
+          if diag[\"anomalias_detectadas\"]:
+              print(f'⚠️ Anomalias: {diag[\"anomalias_detectadas\"]}')
+          if diag[\"auto_curas_aplicadas\"]:
+              print(f'🛠️ Auto-Curas: {diag[\"auto_curas_aplicadas\"]}')
           "
