@@ -255,7 +255,8 @@ class JucaSupervisor:
             "render_latencia_ms": None,
             "render_status_code": None,
             "data_recente_ml": None,
-            "data_recente_b3": None,
+            "data_recente_b3_acoes": None,
+            "data_recente_indices_eua": None,
             "total_registros_ml": None,
             "webhook_bq_ok": False,
             "webhook_bq_pending": 0,
@@ -263,8 +264,10 @@ class JucaSupervisor:
             "webhook_fabric_ok": False,
             "webhook_fabric_pending": 0,
             "webhook_fabric_erro": None,
-            "teste_sintetico_b3_ok": False,
-            "teste_sintetico_b3_resumo": None,
+            "teste_sintetico_b3_acoes_ok": False,
+            "teste_sintetico_b3_acoes_resumo": None,
+            "teste_sintetico_dow_jones_ok": False,
+            "teste_sintetico_dow_jones_resumo": None,
             "data_esperada_mercado": str(obter_data_esperada_mercado()),
             "anomalias": [],
             "auto_cura_aplicada": []
@@ -280,7 +283,8 @@ class JucaSupervisor:
                 resultado["render_online"] = True
                 d_st = r_st.json()
                 resultado["data_recente_ml"] = d_st.get("data_recente")
-                resultado["data_recente_b3"] = d_st.get("b3_indices_max_data")
+                resultado["data_recente_b3_acoes"] = d_st.get("b3_tickers_max_data") or d_st.get("b3_ibov_max_data")
+                resultado["data_recente_indices_eua"] = d_st.get("b3_indices_eua_max_data") or d_st.get("b3_indices_max_data")
                 resultado["total_registros_ml"] = d_st.get("total_registros")
             else:
                 resultado["anomalias"].append(f"Render retornou HTTP {r_st.status_code} no endpoint /status")
@@ -340,29 +344,48 @@ class JucaSupervisor:
             except Exception as e_fix:
                 logger.error(f"Erro ao reconfigurar webhooks: {e_fix}")
 
-        # D) PROBE 4: TESTE SINTÉTICO FUNCIONAL B3 (Dow Jones)
+        # D1) PROBE 4.1: TESTE SINTÉTICO AÇÕES / ATIVOS B3 (PETR4)
         try:
-            r_syn = requests.get(f"{self.bot_url}/test_b3?q=Dow%20Jones", timeout=10)
-            if r_syn.status_code == 200:
-                corpo = r_syn.json().get("resposta", "")
-                if "Dow Jones" in corpo and "Fechamento" in corpo:
-                    resultado["teste_sintetico_b3_ok"] = True
-                    # Extrai linha de cabeçalho e fechamento
-                    linhas_syn = [l.strip() for l in corpo.split("\n") if l.strip()]
-                    resultado["teste_sintetico_b3_resumo"] = linhas_syn[0] if linhas_syn else "OK"
+            r_syn_b3 = requests.get(f"{self.bot_url}/test_b3?q=PETR4", timeout=10)
+            if r_syn_b3.status_code == 200:
+                corpo_b3 = r_syn_b3.json().get("resposta", "")
+                if "PETR4" in corpo_b3 and ("Fechamento" in corpo_b3 or "Preço" in corpo_b3):
+                    resultado["teste_sintetico_b3_acoes_ok"] = True
+                    linhas_b3 = [l.strip() for l in corpo_b3.split("\n") if l.strip()]
+                    resultado["teste_sintetico_b3_acoes_resumo"] = linhas_b3[0] if linhas_b3 else "OK"
                 else:
-                    resultado["anomalias"].append("Teste sintético de Dow Jones retornou resposta incompleta ou vazia")
+                    resultado["anomalias"].append("Teste sintético de Ações B3 (PETR4) retornou resposta incompleta")
             else:
-                resultado["anomalias"].append(f"Teste sintético de Dow Jones falhou com HTTP {r_syn.status_code}")
-        except Exception as e_syn:
-            resultado["anomalias"].append(f"Exceção no teste sintético Dow Jones: {str(e_syn)[:100]}")
+                resultado["anomalias"].append(f"Teste sintético de Ações B3 (PETR4) falhou com HTTP {r_syn_b3.status_code}")
+        except Exception as e_syn_b3:
+            resultado["anomalias"].append(f"Exceção no teste sintético Ações B3 (PETR4): {str(e_syn_b3)[:100]}")
 
-        # E) PROBE 5: ANÁLISE DE FRESCOR DE DADOS (DATA FRESHNESS)
+        # D2) PROBE 4.2: TESTE SINTÉTICO ÍNDICES AMERICANOS (Dow Jones)
+        try:
+            r_syn_eua = requests.get(f"{self.bot_url}/test_b3?q=Dow%20Jones", timeout=10)
+            if r_syn_eua.status_code == 200:
+                corpo_eua = r_syn_eua.json().get("resposta", "")
+                if "Dow Jones" in corpo_eua and ("Fechamento" in corpo_eua or "pts" in corpo_eua):
+                    resultado["teste_sintetico_dow_jones_ok"] = True
+                    linhas_eua = [l.strip() for l in corpo_eua.split("\n") if l.strip()]
+                    resultado["teste_sintetico_dow_jones_resumo"] = linhas_eua[0] if linhas_eua else "OK"
+                else:
+                    resultado["anomalias"].append("Teste sintético de Índices EUA (Dow Jones) retornou resposta incompleta")
+            else:
+                resultado["anomalias"].append(f"Teste sintético de Índices EUA (Dow Jones) falhou com HTTP {r_syn_eua.status_code}")
+        except Exception as e_syn_eua:
+            resultado["anomalias"].append(f"Exceção no teste sintético Dow Jones: {str(e_syn_eua)[:100]}")
+
+        # E) PROBE 5: ANÁLISE DE FRESCOR DE DADOS (DATA FRESHNESS INDEPENDENTE)
         dt_esp = str(obter_data_esperada_mercado())
-        dt_b3 = resultado.get("data_recente_b3")
-        if dt_b3 and dt_b3 < dt_esp:
-            msg_dt = f"Base B3 no robô está defasada ({dt_b3} vs data esperada de pregão {dt_esp})"
-            resultado["anomalias"].append(msg_dt)
+        dt_acoes = resultado.get("data_recente_b3_acoes")
+        dt_eua = resultado.get("data_recente_indices_eua")
+
+        if dt_acoes and dt_acoes < dt_esp:
+            resultado["anomalias"].append(f"Base de Ações B3 (PETR4) está defasada ({dt_acoes} vs esperada {dt_esp})")
+        
+        if dt_eua and dt_eua < dt_esp:
+            resultado["anomalias"].append(f"Base de Índices Americanos (Dow Jones) está defasada ({dt_eua} vs esperada {dt_esp})")
 
         return resultado
 
@@ -777,12 +800,15 @@ class JucaSupervisor:
             },
             "frescor_dados": {
                 "mercado_livre": saude_bots["data_recente_ml"],
-                "b3_indices": saude_bots["data_recente_b3"],
+                "b3_acoes": saude_bots["data_recente_b3_acoes"],
+                "indices_eua": saude_bots["data_recente_indices_eua"],
                 "esperado_mercado": saude_bots["data_esperada_mercado"]
             },
             "teste_sintetico": {
-                "dow_jones_ok": saude_bots["teste_sintetico_b3_ok"],
-                "amostra_resposta": saude_bots["teste_sintetico_b3_resumo"]
+                "b3_acoes_ok": saude_bots["teste_sintetico_b3_acoes_ok"],
+                "amostra_b3_acoes": saude_bots["teste_sintetico_b3_acoes_resumo"],
+                "dow_jones_ok": saude_bots["teste_sintetico_dow_jones_ok"],
+                "amostra_dow_jones": saude_bots["teste_sintetico_dow_jones_resumo"]
             },
             "anomalias_detectadas": saude_bots["anomalias"],
             "auto_curas_aplicadas": saude_bots["auto_cura_aplicada"],
@@ -804,6 +830,7 @@ class JucaSupervisor:
             rend = diag["infra_render"]
             wh = diag["webhooks_telegram"]
             frescor = diag["frescor_dados"]
+            syn = diag["teste_sintetico"]
             anomalias = diag["anomalias_detectadas"]
             curas = diag["auto_curas_aplicadas"]
 
@@ -823,10 +850,13 @@ class JucaSupervisor:
                 f"• **Joca_Fabric:** {'🟢 Ativo' if wh['joca_fabric']['ok'] else '🔴 Falha'} (Fila: {wh['joca_fabric']['fila_pendente']} msg)\n\n"
                 f"📊 **3. Frescor dos Dados (Integridade):**\n"
                 f"• Base Mercado Livre: {frescor['mercado_livre'] or 'N/D'}\n"
-                f"• Base B3 / Índices: {frescor['b3_indices'] or 'N/D'} (Data esperada: {frescor['esperado_mercado']})\n\n"
-                f"🎯 **4. Teste Sintético ao Vivo (Dow Jones):**\n"
-                f"• Execução: {'🟢 100% Sucesso' if diag['teste_sintetico']['dow_jones_ok'] else '🔴 Falhou'}\n"
-                f"• Retorno: *{diag['teste_sintetico']['amostra_resposta'] or 'N/D'}*\n\n"
+                f"• Base Ações B3 (PETR4/Ibov): {frescor['b3_acoes'] or 'N/D'}\n"
+                f"• Base Índices EUA (Dow Jones): {frescor['indices_eua'] or 'N/D'} (Data esperada: {frescor['esperado_mercado']})\n\n"
+                f"🎯 **4. Testes Sintéticos ao Vivo (B3 Dupla Prova):**\n"
+                f"• **Ações B3 (PETR4):** {'🟢 100% Sucesso' if syn['b3_acoes_ok'] else '🔴 Falhou'}\n"
+                f"  *Retorno:* _{syn['amostra_b3_acoes'] or 'N/D'}_\n"
+                f"• **Índices EUA (Dow Jones):** {'🟢 100% Sucesso' if syn['dow_jones_ok'] else '🔴 Falhou'}\n"
+                f"  *Retorno:* _{syn['amostra_dow_jones'] or 'N/D'}_\n\n"
                 f"🚨 **Problemas Identificados:**\n"
                 f"{linhas_anomalias}\n\n"
                 f"🛠️ **Ações de Auto-Recuperação Realizadas:**\n"
@@ -839,12 +869,13 @@ class JucaSupervisor:
         if any(w in t for w in ["CONSERTA", "CONSERTAR", "AUTO-CURA", "AUTOCURA", "REPARAR", "ACORDA"]):
             rel = self.executar_ciclo_vigilancia()
             diag = self.diagnosticar_problemas_profundo()
+            syn = diag["teste_sintetico"]
             return (
                 f"⚡ **Comandante {user_name}! Auto-Recuperação Executada:**\n\n"
                 f"👉 Acabei de varrer todo o ecossistema, re-amarrar webhooks e acionar Keep-Alive!\n"
                 f"🌐 Render: {'🟢 Online' if diag['infra_render']['online'] else '🔴 Offline'}\n"
                 f"📱 Webhooks Telegram: Joca_BQ ({'🟢' if diag['webhooks_telegram']['joca_bigquery']['ok'] else '🔴'}) | Joca_Fabric ({'🟢' if diag['webhooks_telegram']['joca_fabric']['ok'] else '🔴'})\n"
-                f"🎯 Teste Dow Jones: {'🟢 OK' if diag['teste_sintetico']['dow_jones_ok'] else '🔴 Falha'}\n"
+                f"🎯 Testes Sintéticos B3: Ações B3 ({'🟢 OK' if syn['b3_acoes_ok'] else '🔴 Falha'}) | Dow Jones ({'🟢 OK' if syn['dow_jones_ok'] else '🔴 Falha'})\n"
                 f"🕒 Horário: {agora}"
             )
 
