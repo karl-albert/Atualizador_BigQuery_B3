@@ -526,7 +526,11 @@ def sincronizar_com_joca_b3(client, df_tickers, df_ibov, df_dolar, df_investidor
             logger.info(f" -> fato_fluxo_investidores_b3: {con.execute('SELECT count(*) FROM fato_fluxo_investidores_b3').fetchone()[0]} linhas")
 
         if df_indices is not None and not df_indices.empty:
-            con.execute("CREATE TABLE fato_indices_americanos AS SELECT * FROM df_indices")
+            df_ind_duck = df_indices.copy()
+            df_ind_duck.columns = [c.lower() for c in df_ind_duck.columns]
+            if "data_coleta" in df_ind_duck.columns and "data" not in df_ind_duck.columns:
+                df_ind_duck = df_ind_duck.rename(columns={"data_coleta": "data"})
+            con.execute("CREATE TABLE fato_indices_americanos AS SELECT * FROM df_ind_duck")
             logger.info(f" -> fato_indices_americanos: {con.execute('SELECT count(*) FROM fato_indices_americanos').fetchone()[0]} linhas")
 
         # 2. Tabelas Dimensionais e Macro do BigQuery
