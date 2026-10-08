@@ -1,6 +1,8 @@
 name: Rotina Atualização B3 BigQuery
 
 on:
+  push:
+    branches: [ main ]
   schedule:
     # 10h40, 14h40 e 18h40 Horário de Brasília (UTC-3) de Segunda a Sexta
     - cron: '40 13,17,21 * * 1-5'
