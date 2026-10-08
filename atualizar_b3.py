@@ -59,9 +59,12 @@ def obter_clientes_bigquery():
             sa_info = json.loads(GCP_SA_KEY.strip())
             creds = service_account.Credentials.from_service_account_info(sa_info)
             sa_proj = sa_info.get("project_id")
+            sa_email = sa_info.get("client_email")
             if sa_proj:
                 candidatos.append(sa_proj)
-            logger.info(f"Credenciais de Service Account carregadas (Projeto SA: {sa_proj}).")
+            logger.info(f"🔑 Credenciais de Service Account carregadas:")
+            logger.info(f"   -> E-mail SA: {sa_email}")
+            logger.info(f"   -> Projeto SA: {sa_proj}")
         except Exception as e_sa:
             if os.path.exists(GCP_SA_KEY.strip()):
                 creds = service_account.Credentials.from_service_account_file(GCP_SA_KEY.strip())
@@ -69,7 +72,7 @@ def obter_clientes_bigquery():
             else:
                 logger.warning(f"Aviso ao decodificar GCP_SA_KEY: {e_sa}")
 
-    for p in [GCP_PROJECT_ID, "balmy-renderer-458017-a3", "project-1c5de651-f9e1-439e-854"]:
+    for p in ["project-1c5de651-f9e1-439e-854", "balmy-renderer-458017-a3", GCP_PROJECT_ID]:
         if p and p not in candidatos:
             candidatos.append(p)
 
@@ -83,6 +86,7 @@ def obter_clientes_bigquery():
             logger.info(f"Cliente BigQuery preparado para projeto alvo '{p}'.")
         except Exception as e_cl:
             logger.warning(f"Não foi possível preparar cliente para '{p}': {e_cl}")
+
 
     if not clients:
         raise RuntimeError("Nenhum cliente BigQuery pôde ser inicializado.")
@@ -470,13 +474,19 @@ def upsert_tabela_blindada(clients: list, df_novos: pd.DataFrame, nome_tabela: s
         if "atualizado_em" in df_consolidado.columns or "criado_em" in df_consolidado.columns:
             df_consolidado["atualizado_em"] = now
 
+        sucesso_projeto = False
         try:
             job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
             logger.info(f"Carregando {qtd_consolidada} registros em '{tabela_destino}'...")
-            client.load_table_from_dataframe(df_consolidado, tabela_destino, job_config=job_config).result()
-            logger.info(f"✅ [SUCESSO] Tabela oficial '{tabela_destino}' atualizada com sucesso ({qtd_consolidada} registros).")
+            load_job = client.load_table_from_dataframe(df_consolidado, tabela_destino, job_config=job_config)
+            load_job.result()
+            logger.info(f"✅ [SUCESSO] Tabela '{tabela_destino}' gravada com sucesso ({qtd_consolidada} registros).")
+            sucesso_projeto = True
         except Exception as e_load:
-            logger.warning(f"Não foi possível carregar em '{tabela_destino}': {e_load}")
+            logger.error(f"❌ [ERRO BIGQUERY] Falha ao gravar em '{tabela_destino}': {e_load}")
+            if "403" in str(e_load) or "Access Denied" in str(e_load) or "Permission" in str(e_load):
+                logger.error(f"   👉 O Service Account precisa da permissão 'BigQuery Admin' ou 'BigQuery Data Editor' no projeto '{proj_id}' no IAM da Google Cloud!")
+
 
 
 # ==============================================================================
