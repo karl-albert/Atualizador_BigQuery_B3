@@ -35,8 +35,8 @@ logger = logging.getLogger("Atualizador_Macro")
 # CONFIGURAÇÕES E VARIÁVEIS DE AMBIENTE
 # ==============================================================================
 GCP_SA_KEY = os.environ.get("GCP_SA_KEY")
-RAW_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "b3-brasil-bolsa-balcao")
-GCP_PROJECT_ID = RAW_PROJECT_ID.strip() if RAW_PROJECT_ID else "b3-brasil-bolsa-balcao"
+RAW_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "project-1c5de651-f9e1-439e-854")
+GCP_PROJECT_ID = RAW_PROJECT_ID.strip() if RAW_PROJECT_ID else "project-1c5de651-f9e1-439e-854"
 DATASET_ID = os.environ.get("DATASET_ID", "B3").strip()
 
 START_DATE = date(2020, 1, 1)

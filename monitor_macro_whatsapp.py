@@ -31,7 +31,7 @@ logger = logging.getLogger("Monitor_WhatsApp")
 # CONFIGURAÇÕES E CREDENCIAIS
 # ==============================================================================
 GCP_SA_KEY = os.environ.get("GCP_SA_KEY")
-GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "b3-brasil-bolsa-balcao").strip()
+GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "project-1c5de651-f9e1-439e-854").strip()
 DATASET_ID = os.environ.get("DATASET_ID", "B3").strip()
 
 # Configurações do WhatsApp
