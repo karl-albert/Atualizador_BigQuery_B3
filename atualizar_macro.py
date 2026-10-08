@@ -44,30 +44,46 @@ START_DATE = date(2020, 1, 1)
 # ==============================================================================
 # 1. CLIENTE BIGQUERY
 # ==============================================================================
-def obter_cliente_bigquery():
-    """Inicializa o cliente do Google BigQuery via Service Account ou ADC de forma resiliente."""
-    global GCP_PROJECT_ID
-    try:
-        if GCP_SA_KEY:
-            try:
-                sa_info = json.loads(GCP_SA_KEY.strip())
-                credentials = service_account.Credentials.from_service_account_info(sa_info)
-                client = bigquery.Client(project=GCP_PROJECT_ID, credentials=credentials)
-                logger.info(f"Conectado ao BigQuery com Service Account no projeto alvo '{GCP_PROJECT_ID}'.")
-                return client
-            except json.JSONDecodeError:
-                if os.path.exists(GCP_SA_KEY.strip()):
-                    credentials = service_account.Credentials.from_service_account_file(GCP_SA_KEY.strip())
-                    client = bigquery.Client(project=GCP_PROJECT_ID, credentials=credentials)
-                    logger.info(f"Conectado ao BigQuery via arquivo de credenciais no projeto '{GCP_PROJECT_ID}'.")
-                    return client
-        
-        client = bigquery.Client(project=GCP_PROJECT_ID)
-        logger.info(f"Conectado ao BigQuery via ADC no projeto '{GCP_PROJECT_ID}'.")
-        return client
-    except Exception as e:
-        logger.error(f"Erro crítico ao inicializar cliente do BigQuery: {e}")
-        raise e
+def obter_clientes_bigquery():
+    """Inicializa os clientes do Google BigQuery para todos os projetos candidatos de forma resiliente."""
+    clients = []
+    candidatos = []
+    creds = None
+
+    if GCP_SA_KEY:
+        try:
+            sa_info = json.loads(GCP_SA_KEY.strip())
+            creds = service_account.Credentials.from_service_account_info(sa_info)
+            sa_proj = sa_info.get("project_id")
+            if sa_proj:
+                candidatos.append(sa_proj)
+            logger.info(f"Credenciais de Service Account carregadas (Projeto SA: {sa_proj}).")
+        except Exception as e_sa:
+            if os.path.exists(GCP_SA_KEY.strip()):
+                creds = service_account.Credentials.from_service_account_file(GCP_SA_KEY.strip())
+                logger.info(f"Credenciais carregadas do arquivo {GCP_SA_KEY}.")
+            else:
+                logger.warning(f"Aviso ao decodificar GCP_SA_KEY: {e_sa}")
+
+    for p in [GCP_PROJECT_ID, "balmy-renderer-458017-a3", "project-1c5de651-f9e1-439e-854"]:
+        if p and p not in candidatos:
+            candidatos.append(p)
+
+    for p in candidatos:
+        try:
+            if creds:
+                c = bigquery.Client(project=p, credentials=creds)
+            else:
+                c = bigquery.Client(project=p)
+            clients.append((p, c))
+            logger.info(f"Cliente BigQuery preparado para projeto alvo '{p}'.")
+        except Exception as e_cl:
+            logger.warning(f"Não foi possível preparar cliente para '{p}': {e_cl}")
+
+    if not clients:
+        raise RuntimeError("Nenhum cliente BigQuery pôde ser inicializado.")
+    return clients
+
 
 
 # ==============================================================================
@@ -146,9 +162,9 @@ def extrair_macro_trimestrais() -> pd.DataFrame:
 # ==============================================================================
 # 3. CARGA INCREMENTAL BLINDADA NO BIGQUERY
 # ==============================================================================
-def upsert_tabela_blindada(client: bigquery.Client, df_novos: pd.DataFrame, nome_tabela: str, chaves: list):
+def upsert_tabela_blindada(clients: list, df_novos: pd.DataFrame, nome_tabela: str, chaves: list):
     """
-    Carga incremental blindada:
+    Carga incremental blindada gravando em todos os projetos BigQuery acessíveis:
     1. Lê base histórica existente no BigQuery.
     2. Consolida com dados novos e desduplica pelas chaves.
     3. Trava de segurança: impede redução de volume de dados.
@@ -158,41 +174,57 @@ def upsert_tabela_blindada(client: bigquery.Client, df_novos: pd.DataFrame, nome
         logger.info(f"Nenhum dado novo para '{nome_tabela}'.")
         return
 
-    tabela_destino = f"{GCP_PROJECT_ID}.{DATASET_ID}.{nome_tabela}"
-    
-    try:
-        query = f"SELECT * FROM `{tabela_destino}`"
-        df_existente = client.query(query).to_dataframe()
-        
-        if "data" in df_existente.columns:
-            df_existente["data"] = pd.to_datetime(df_existente["data"]).dt.date
-        if "valor" in df_existente.columns:
-            df_existente["valor"] = pd.to_numeric(df_existente["valor"], errors="coerce")
-            
-        qtd_existente = len(df_existente)
-        logger.info(f"Lidos {qtd_existente} registros históricos existentes de '{tabela_destino}'.")
-        df_consolidado = pd.concat([df_existente, df_novos], ignore_index=True)
-    except Exception as e:
-        logger.info(f"Tabela '{tabela_destino}' vazia ou nova: {e}")
-        qtd_existente = 0
-        df_consolidado = df_novos
-
-    df_consolidado = df_consolidado.drop_duplicates(subset=chaves, keep="last")
-    qtd_consolidada = len(df_consolidado)
-
-    if qtd_existente > 0 and qtd_consolidada < qtd_existente:
-        logger.error(f"❌ [TRAVA DE SEGURANÇA ACIONADA] Carga abortada: base consolidada ({qtd_consolidada}) menor que existente ({qtd_existente})!")
-        return
-
     now = datetime.now()
-    df_consolidado["atualizado_em"] = now
-    if "criado_em" not in df_consolidado.columns:
-        df_consolidado["criado_em"] = now
 
-    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
-    logger.info(f"Carregando {qtd_consolidada} registros totais em '{tabela_destino}'...")
-    client.load_table_from_dataframe(df_consolidado, tabela_destino, job_config=job_config).result()
-    logger.info(f"✅ [SUCESSO] Tabela '{tabela_destino}' atualizada ({qtd_consolidada} registros).")
+    for proj_id, client in clients:
+        tabela_destino = f"{proj_id}.{DATASET_ID}.{nome_tabela}"
+        try:
+            ds_ref = bigquery.DatasetReference(proj_id, DATASET_ID)
+            client.get_dataset(ds_ref)
+        except Exception:
+            try:
+                ds = bigquery.Dataset(f"{proj_id}.{DATASET_ID}")
+                ds.location = "US"
+                client.create_dataset(ds, exists_ok=True)
+                logger.info(f"Dataset '{proj_id}.{DATASET_ID}' criado com sucesso.")
+            except Exception as e_ds:
+                logger.warning(f"Aviso ao verificar/criar dataset em {proj_id}: {e_ds}")
+
+        try:
+            query = f"SELECT * FROM `{tabela_destino}`"
+            df_existente = client.query(query).to_dataframe()
+            
+            if "data" in df_existente.columns:
+                df_existente["data"] = pd.to_datetime(df_existente["data"]).dt.date
+            if "valor" in df_existente.columns:
+                df_existente["valor"] = pd.to_numeric(df_existente["valor"], errors="coerce")
+                
+            qtd_existente = len(df_existente)
+            logger.info(f"Lidos {qtd_existente} registros históricos existentes de '{tabela_destino}'.")
+            df_consolidado = pd.concat([df_existente, df_novos], ignore_index=True)
+        except Exception as e:
+            logger.info(f"Tabela '{tabela_destino}' vazia ou nova: {e}")
+            qtd_existente = 0
+            df_consolidado = df_novos
+
+        df_consolidado = df_consolidado.drop_duplicates(subset=chaves, keep="last")
+        qtd_consolidada = len(df_consolidado)
+
+        if qtd_existente > 0 and qtd_consolidada < qtd_existente:
+            logger.error(f"❌ [TRAVA DE SEGURANÇA ACIONADA] Carga abortada em {tabela_destino}: base consolidada ({qtd_consolidada}) menor que existente ({qtd_existente})!")
+            continue
+
+        df_consolidado["atualizado_em"] = now
+        if "criado_em" not in df_consolidado.columns:
+            df_consolidado["criado_em"] = now
+
+        try:
+            job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
+            logger.info(f"Carregando {qtd_consolidada} registros totais em '{tabela_destino}'...")
+            client.load_table_from_dataframe(df_consolidado, tabela_destino, job_config=job_config).result()
+            logger.info(f"✅ [SUCESSO] Tabela '{tabela_destino}' atualizada ({qtd_consolidada} registros).")
+        except Exception as e_load:
+            logger.warning(f"Não foi possível carregar em '{tabela_destino}': {e_load}")
 
 
 # ==============================================================================
@@ -203,15 +235,15 @@ def main():
     logger.info(f"INICIANDO ROTINA SEMANAL DE MACROECONOMIA -> BIGQUERY [{datetime.now()}]")
     logger.info("=" * 70)
 
-    client = obter_cliente_bigquery()
+    clients = obter_clientes_bigquery()
 
     # 1. Macro Mensais (IPCA, IGP-M, CAGED, Salário Mínimo, IBC-Br)
     df_macro_m = extrair_macro_mensais()
-    upsert_tabela_blindada(client, df_macro_m, "Fato_macro_mensais", chaves=["indicador", "data"])
+    upsert_tabela_blindada(clients, df_macro_m, "Fato_macro_mensais", chaves=["indicador", "data"])
 
     # 2. PIB Trimestral
     df_pib = extrair_macro_trimestrais()
-    upsert_tabela_blindada(client, df_pib, "Fato_macro_trimestrais", chaves=["indicador", "data"])
+    upsert_tabela_blindada(clients, df_pib, "Fato_macro_trimestrais", chaves=["indicador", "data"])
 
     logger.info("=" * 70)
     logger.info("ROTINA SEMANAL DE MACROECONOMIA FINALIZADA COM 100% DE SUCESSO!")

@@ -48,54 +48,72 @@ HEADERS_REQ = {
 # ==============================================================================
 # 1. CLIENTE BIGQUERY
 # ==============================================================================
-def obter_cliente_bigquery():
-    """Inicializa o cliente do Google BigQuery via Service Account ou ADC."""
-    global GCP_PROJECT_ID
-    try:
-        if GCP_SA_KEY:
-            try:
-                sa_info = json.loads(GCP_SA_KEY.strip())
-                credentials = service_account.Credentials.from_service_account_info(sa_info)
-                client = bigquery.Client(project=GCP_PROJECT_ID, credentials=credentials)
-                logger.info(f"Conectado ao BigQuery com Service Account no projeto alvo '{GCP_PROJECT_ID}'.")
-                return client
-            except json.JSONDecodeError:
-                if os.path.exists(GCP_SA_KEY.strip()):
-                    credentials = service_account.Credentials.from_service_account_file(GCP_SA_KEY.strip())
-                    client = bigquery.Client(project=GCP_PROJECT_ID, credentials=credentials)
-                    logger.info(f"Conectado ao BigQuery via arquivo de credenciais no projeto '{GCP_PROJECT_ID}'.")
-                    return client
-        
-        client = bigquery.Client(project=GCP_PROJECT_ID)
-        logger.info(f"Conectado ao BigQuery via ADC no projeto '{GCP_PROJECT_ID}'.")
-        return client
-    except Exception as e:
-        logger.error(f"Erro crítico ao inicializar cliente do BigQuery: {e}")
-        raise e
+def obter_clientes_bigquery():
+    """Inicializa os clientes do Google BigQuery para todos os projetos candidatos de forma resiliente."""
+    clients = []
+    candidatos = []
+    creds = None
+
+    if GCP_SA_KEY:
+        try:
+            sa_info = json.loads(GCP_SA_KEY.strip())
+            creds = service_account.Credentials.from_service_account_info(sa_info)
+            sa_proj = sa_info.get("project_id")
+            if sa_proj:
+                candidatos.append(sa_proj)
+            logger.info(f"Credenciais de Service Account carregadas (Projeto SA: {sa_proj}).")
+        except Exception as e_sa:
+            if os.path.exists(GCP_SA_KEY.strip()):
+                creds = service_account.Credentials.from_service_account_file(GCP_SA_KEY.strip())
+                logger.info(f"Credenciais carregadas do arquivo {GCP_SA_KEY}.")
+            else:
+                logger.warning(f"Aviso ao decodificar GCP_SA_KEY: {e_sa}")
+
+    for p in [GCP_PROJECT_ID, "balmy-renderer-458017-a3", "project-1c5de651-f9e1-439e-854"]:
+        if p and p not in candidatos:
+            candidatos.append(p)
+
+    for p in candidatos:
+        try:
+            if creds:
+                c = bigquery.Client(project=p, credentials=creds)
+            else:
+                c = bigquery.Client(project=p)
+            clients.append((p, c))
+            logger.info(f"Cliente BigQuery preparado para projeto alvo '{p}'.")
+        except Exception as e_cl:
+            logger.warning(f"Não foi possível preparar cliente para '{p}': {e_cl}")
+
+    if not clients:
+        raise RuntimeError("Nenhum cliente BigQuery pôde ser inicializado.")
+    return clients
+
 
 
 # ==============================================================================
 # 2. EXTRAÇÃO DE COTAÇÕES DE TODAS AS AÇÕES DA B3 (HISTÓRICO 5 ANOS)
 # ==============================================================================
-def extrair_cotacoes_b3(client: bigquery.Client) -> pd.DataFrame:
+def extrair_cotacoes_b3(clients: list) -> pd.DataFrame:
     """Extrai cotações da B3 com histórico amplo (5 anos) para alimentar todas as janelas."""
     tickers = []
-    try:
-        # Tentar obter lista de tickers monitorados da tabela ou dimensão
-        for q in [
-            f"SELECT DISTINCT ticker FROM `{GCP_PROJECT_ID}.{DATASET_ID}.Dim_Ativos_Board` WHERE ticker IS NOT NULL",
-            f"SELECT DISTINCT ticker FROM `{GCP_PROJECT_ID}.{DATASET_ID}.Fato_B3_tickers` WHERE ticker IS NOT NULL"
-        ]:
-            try:
-                df_t = client.query(q).to_dataframe()
-                tickers = df_t["ticker"].dropna().unique().tolist()
-                if tickers and len(tickers) > 5:
-                    logger.info(f"Lista de {len(tickers)} ativos obtida do BigQuery.")
-                    break
-            except Exception:
-                pass
-    except Exception as e:
-        logger.warning(f"Erro ao obter lista de tickers: {e}.")
+    for proj_id, client in clients:
+        try:
+            for q in [
+                f"SELECT DISTINCT ticker FROM `{proj_id}.{DATASET_ID}.Dim_Ativos_Board` WHERE ticker IS NOT NULL",
+                f"SELECT DISTINCT ticker FROM `{proj_id}.{DATASET_ID}.Fato_B3_tickers` WHERE ticker IS NOT NULL"
+            ]:
+                try:
+                    df_t = client.query(q).to_dataframe()
+                    tickers = df_t["ticker"].dropna().unique().tolist()
+                    if tickers and len(tickers) > 5:
+                        logger.info(f"Lista de {len(tickers)} ativos obtida do BigQuery ({proj_id}).")
+                        break
+                except Exception:
+                    pass
+            if tickers:
+                break
+        except Exception as e:
+            logger.warning(f"Erro ao obter lista de tickers no projeto {proj_id}: {e}.")
 
     if not tickers:
         logger.info("Usando lista base principal de ativos da B3.")
@@ -395,66 +413,70 @@ def extrair_indices_internacionais() -> pd.DataFrame:
 # ==============================================================================
 # 6. CARGA INCREMENTAL BLINDADA (TABELAS OFICIAIS Fato_B3_* e Fato_Indices_*)
 # ==============================================================================
-def upsert_tabela_blindada(client: bigquery.Client, df_novos: pd.DataFrame, nome_tabela: str, chaves: list):
+def upsert_tabela_blindada(clients: list, df_novos: pd.DataFrame, nome_tabela: str, chaves: list):
     """
-    Carga consolidada blindada:
+    Carga consolidada blindada gravando em todos os projetos BigQuery acessíveis:
     1. Lê base existente (se houver).
     2. Consolida com histórico novo e desduplica pelas chaves.
     3. Trata colunas e timestamps de forma consistente.
-    4. Grava na tabela oficial do BigQuery.
+    4. Grava na tabela oficial do BigQuery em cada projeto.
     """
     if df_novos is None or df_novos.empty:
         logger.info(f"Nenhum dado para a tabela '{nome_tabela}'.")
         return
 
-    tabela_destino = f"{GCP_PROJECT_ID}.{DATASET_ID}.{nome_tabela}"
     now = datetime.now()
-    
-    try:
-        ds_ref = bigquery.DatasetReference(GCP_PROJECT_ID, DATASET_ID)
-        client.get_dataset(ds_ref)
-    except Exception:
+
+    for proj_id, client in clients:
+        tabela_destino = f"{proj_id}.{DATASET_ID}.{nome_tabela}"
         try:
-            ds = bigquery.Dataset(f"{GCP_PROJECT_ID}.{DATASET_ID}")
-            ds.location = "US"
-            client.create_dataset(ds, exists_ok=True)
-            logger.info(f"Dataset '{GCP_PROJECT_ID}.{DATASET_ID}' criado com sucesso.")
-        except Exception as e_ds:
-            logger.warning(f"Aviso ao verificar/criar dataset: {e_ds}")
+            ds_ref = bigquery.DatasetReference(proj_id, DATASET_ID)
+            client.get_dataset(ds_ref)
+        except Exception:
+            try:
+                ds = bigquery.Dataset(f"{proj_id}.{DATASET_ID}")
+                ds.location = "US"
+                client.create_dataset(ds, exists_ok=True)
+                logger.info(f"Dataset '{proj_id}.{DATASET_ID}' criado com sucesso.")
+            except Exception as e_ds:
+                logger.warning(f"Aviso ao verificar/criar dataset em {proj_id}: {e_ds}")
 
-    try:
-        query = f"SELECT * FROM `{tabela_destino}`"
-        df_existente = client.query(query).to_dataframe()
-        if "data" in df_existente.columns:
-            df_existente["data"] = pd.to_datetime(df_existente["data"]).dt.date
-        if "Data_Coleta" in df_existente.columns:
-            df_existente["Data_Coleta"] = pd.to_datetime(df_existente["Data_Coleta"]).dt.date
-        if "volume" in df_existente.columns:
-            df_existente["volume"] = pd.to_numeric(df_existente["volume"], errors="coerce").fillna(0).astype("int64")
-        if "Volume" in df_existente.columns:
-            df_existente["Volume"] = pd.to_numeric(df_existente["Volume"], errors="coerce").fillna(0).astype("int64")
-            
-        qtd_existente = len(df_existente)
-        df_consolidado = pd.concat([df_existente, df_novos], ignore_index=True)
-    except Exception as e:
-        logger.info(f"Tabela '{tabela_destino}' nova ou vazia: {e}")
-        df_consolidado = df_novos.copy()
+        try:
+            query = f"SELECT * FROM `{tabela_destino}`"
+            df_existente = client.query(query).to_dataframe()
+            if "data" in df_existente.columns:
+                df_existente["data"] = pd.to_datetime(df_existente["data"]).dt.date
+            if "Data_Coleta" in df_existente.columns:
+                df_existente["Data_Coleta"] = pd.to_datetime(df_existente["Data_Coleta"]).dt.date
+            if "volume" in df_existente.columns:
+                df_existente["volume"] = pd.to_numeric(df_existente["volume"], errors="coerce").fillna(0).astype("int64")
+            if "Volume" in df_existente.columns:
+                df_existente["Volume"] = pd.to_numeric(df_existente["Volume"], errors="coerce").fillna(0).astype("int64")
+                
+            qtd_existente = len(df_existente)
+            df_consolidado = pd.concat([df_existente, df_novos], ignore_index=True)
+        except Exception as e:
+            logger.info(f"Tabela '{tabela_destino}' nova ou vazia: {e}")
+            df_consolidado = df_novos.copy()
 
-    df_consolidado = df_consolidado.drop_duplicates(subset=chaves, keep="last")
-    qtd_consolidada = len(df_consolidado)
+        df_consolidado = df_consolidado.drop_duplicates(subset=chaves, keep="last")
+        qtd_consolidada = len(df_consolidado)
 
-    if "criado_em" in df_consolidado.columns:
-        df_consolidado["criado_em"] = pd.to_datetime(df_consolidado["criado_em"]).fillna(now)
-    elif "criado_em" in df_novos.columns:
-        df_consolidado["criado_em"] = now
+        if "criado_em" in df_consolidado.columns:
+            df_consolidado["criado_em"] = pd.to_datetime(df_consolidado["criado_em"]).fillna(now)
+        elif "criado_em" in df_novos.columns:
+            df_consolidado["criado_em"] = now
 
-    if "atualizado_em" in df_consolidado.columns or "criado_em" in df_consolidado.columns:
-        df_consolidado["atualizado_em"] = now
+        if "atualizado_em" in df_consolidado.columns or "criado_em" in df_consolidado.columns:
+            df_consolidado["atualizado_em"] = now
 
-    job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
-    logger.info(f"Carregando {qtd_consolidada} registros em '{tabela_destino}'...")
-    client.load_table_from_dataframe(df_consolidado, tabela_destino, job_config=job_config).result()
-    logger.info(f"✅ [SUCESSO] Tabela oficial '{tabela_destino}' atualizada com sucesso ({qtd_consolidada} registros).")
+        try:
+            job_config = bigquery.LoadJobConfig(write_disposition="WRITE_TRUNCATE")
+            logger.info(f"Carregando {qtd_consolidada} registros em '{tabela_destino}'...")
+            client.load_table_from_dataframe(df_consolidado, tabela_destino, job_config=job_config).result()
+            logger.info(f"✅ [SUCESSO] Tabela oficial '{tabela_destino}' atualizada com sucesso ({qtd_consolidada} registros).")
+        except Exception as e_load:
+            logger.warning(f"Não foi possível carregar em '{tabela_destino}': {e_load}")
 
 
 # ==============================================================================
@@ -465,31 +487,31 @@ def main():
     logger.info(f"INICIANDO CARGA COMPLETA B3 (5 ANOS) -> BIGQUERY [{datetime.now()}]")
     logger.info("=" * 70)
 
-    client = obter_cliente_bigquery()
+    clients = obter_clientes_bigquery()
 
     # 1. Ações da B3 -> Fato_B3_tickers (5 anos de histórico)
-    df_tickers = extrair_cotacoes_b3(client)
-    upsert_tabela_blindada(client, df_tickers, "Fato_B3_tickers", chaves=["ticker", "data"])
+    df_tickers = extrair_cotacoes_b3(clients)
+    upsert_tabela_blindada(clients, df_tickers, "Fato_B3_tickers", chaves=["ticker", "data"])
 
     # 2. Ibovespa -> Fato_B3_ibov (5 anos de histórico)
     df_ibov = extrair_fechamento_ibov()
-    upsert_tabela_blindada(client, df_ibov, "Fato_B3_ibov", chaves=["data"])
+    upsert_tabela_blindada(clients, df_ibov, "Fato_B3_ibov", chaves=["data"])
 
     # 3. Dólar -> Fato_B3_dolar (5 anos de histórico)
     df_dolar = extrair_fechamento_dolar()
-    upsert_tabela_blindada(client, df_dolar, "Fato_B3_dolar", chaves=["data"])
+    upsert_tabela_blindada(clients, df_dolar, "Fato_B3_dolar", chaves=["data"])
 
     # 4. Fluxo de Investidores B3 -> Fato_Fluxo_Investidores_B3
     df_investidores = extrair_fluxo_investidores(dias_retroativos=45)
-    upsert_tabela_blindada(client, df_investidores, "Fato_Fluxo_Investidores_B3", chaves=["data", "tipo_investidor"])
+    upsert_tabela_blindada(clients, df_investidores, "Fato_Fluxo_Investidores_B3", chaves=["data", "tipo_investidor"])
 
     # 5. Índices Internacionais -> Fato_Indices_Americanos (Dow Jones, Nasdaq, NYSE, Brent, OMX)
     df_indices = extrair_indices_internacionais()
-    upsert_tabela_blindada(client, df_indices, "Fato_Indices_Americanos", chaves=["Data_Coleta", "Ticker"])
+    upsert_tabela_blindada(clients, df_indices, "Fato_Indices_Americanos", chaves=["Data_Coleta", "Ticker"])
 
     # 6. Sincronização Automática com o Robô Joca B3 no Render (Zero-Click)
     try:
-        sincronizar_com_joca_b3(client, df_tickers, df_ibov, df_dolar, df_investidores, df_indices)
+        sincronizar_com_joca_b3(clients, df_tickers, df_ibov, df_dolar, df_investidores, df_indices)
     except Exception as e_sync:
         logger.warning(f"Aviso ao sincronizar com o Joca B3: {e_sync}")
 
@@ -498,7 +520,7 @@ def main():
     logger.info("=" * 70)
 
 
-def sincronizar_com_joca_b3(client, df_tickers, df_ibov, df_dolar, df_investidores, df_indices):
+def sincronizar_com_joca_b3(clients, df_tickers, df_ibov, df_dolar, df_investidores, df_indices):
     """
     Sincroniza automaticamente a base da B3 com o Joca B3 no Render (24/7).
     Executado no final do pipeline no GitHub Actions para garantir ZERO-CLICK.
@@ -553,12 +575,19 @@ def sincronizar_com_joca_b3(client, df_tickers, df_ibov, df_dolar, df_investidor
         ]
 
         for bq_tbl, duck_tbl in dim_macro_tables:
-            try:
-                df_aux = client.query(f"SELECT * FROM `{GCP_PROJECT_ID}.{DATASET_ID}.{bq_tbl}`").to_dataframe()
-                con.execute(f"CREATE TABLE {duck_tbl} AS SELECT * FROM df_aux")
-                logger.info(f" -> {duck_tbl}: {len(df_aux)} linhas importadas do BigQuery")
-            except Exception as e_aux:
-                logger.warning(f"Aviso ao carregar {bq_tbl}: {e_aux}")
+            loaded = False
+            for proj_id, client in clients:
+                try:
+                    df_aux = client.query(f"SELECT * FROM `{proj_id}.{DATASET_ID}.{bq_tbl}`").to_dataframe()
+                    if not df_aux.empty:
+                        con.execute(f"CREATE TABLE {duck_tbl} AS SELECT * FROM df_aux")
+                        logger.info(f" -> {duck_tbl}: {len(df_aux)} linhas importadas do BigQuery ({proj_id})")
+                        loaded = True
+                        break
+                except Exception:
+                    pass
+            if not loaded:
+                logger.info(f"Aviso: Tabela opcional {bq_tbl} não encontrada nos projetos BigQuery.")
 
         con.close()
 
