@@ -51,11 +51,9 @@ def obter_cliente_bigquery():
         if GCP_SA_KEY:
             try:
                 sa_info = json.loads(GCP_SA_KEY.strip())
-                if "project_id" in sa_info and sa_info["project_id"]:
-                    GCP_PROJECT_ID = sa_info["project_id"].strip()
                 credentials = service_account.Credentials.from_service_account_info(sa_info)
                 client = bigquery.Client(project=GCP_PROJECT_ID, credentials=credentials)
-                logger.info(f"Conectado ao BigQuery com Service Account no projeto '{GCP_PROJECT_ID}'.")
+                logger.info(f"Conectado ao BigQuery com Service Account no projeto alvo '{GCP_PROJECT_ID}'.")
                 return client
             except json.JSONDecodeError:
                 if os.path.exists(GCP_SA_KEY.strip()):

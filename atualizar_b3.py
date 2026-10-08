@@ -55,11 +55,9 @@ def obter_cliente_bigquery():
         if GCP_SA_KEY:
             try:
                 sa_info = json.loads(GCP_SA_KEY.strip())
-                if "project_id" in sa_info and sa_info["project_id"]:
-                    GCP_PROJECT_ID = sa_info["project_id"].strip()
                 credentials = service_account.Credentials.from_service_account_info(sa_info)
                 client = bigquery.Client(project=GCP_PROJECT_ID, credentials=credentials)
-                logger.info(f"Conectado ao BigQuery com Service Account no projeto '{GCP_PROJECT_ID}'.")
+                logger.info(f"Conectado ao BigQuery com Service Account no projeto alvo '{GCP_PROJECT_ID}'.")
                 return client
             except json.JSONDecodeError:
                 if os.path.exists(GCP_SA_KEY.strip()):
@@ -412,6 +410,18 @@ def upsert_tabela_blindada(client: bigquery.Client, df_novos: pd.DataFrame, nome
     tabela_destino = f"{GCP_PROJECT_ID}.{DATASET_ID}.{nome_tabela}"
     now = datetime.now()
     
+    try:
+        ds_ref = bigquery.DatasetReference(GCP_PROJECT_ID, DATASET_ID)
+        client.get_dataset(ds_ref)
+    except Exception:
+        try:
+            ds = bigquery.Dataset(f"{GCP_PROJECT_ID}.{DATASET_ID}")
+            ds.location = "US"
+            client.create_dataset(ds, exists_ok=True)
+            logger.info(f"Dataset '{GCP_PROJECT_ID}.{DATASET_ID}' criado com sucesso.")
+        except Exception as e_ds:
+            logger.warning(f"Aviso ao verificar/criar dataset: {e_ds}")
+
     try:
         query = f"SELECT * FROM `{tabela_destino}`"
         df_existente = client.query(query).to_dataframe()
