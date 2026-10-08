@@ -489,17 +489,20 @@ def main():
 
     clients = obter_clientes_bigquery()
 
-    # 1. Ações da B3 -> Fato_B3_tickers (5 anos de histórico)
+    # 1. Ações da B3 -> Fato_B3_tickers & Fato_fechamento_tickers (5 anos de histórico)
     df_tickers = extrair_cotacoes_b3(clients)
     upsert_tabela_blindada(clients, df_tickers, "Fato_B3_tickers", chaves=["ticker", "data"])
+    upsert_tabela_blindada(clients, df_tickers, "Fato_fechamento_tickers", chaves=["ticker", "data"])
 
-    # 2. Ibovespa -> Fato_B3_ibov (5 anos de histórico)
+    # 2. Ibovespa -> Fato_B3_ibov & Fato_fechamento_ibov (5 anos de histórico)
     df_ibov = extrair_fechamento_ibov()
     upsert_tabela_blindada(clients, df_ibov, "Fato_B3_ibov", chaves=["data"])
+    upsert_tabela_blindada(clients, df_ibov, "Fato_fechamento_ibov", chaves=["data"])
 
-    # 3. Dólar -> Fato_B3_dolar (5 anos de histórico)
+    # 3. Dólar -> Fato_B3_dolar & Fato_fechamento_dolar (5 anos de histórico)
     df_dolar = extrair_fechamento_dolar()
     upsert_tabela_blindada(clients, df_dolar, "Fato_B3_dolar", chaves=["data"])
+    upsert_tabela_blindada(clients, df_dolar, "Fato_fechamento_dolar", chaves=["data"])
 
     # 4. Fluxo de Investidores B3 -> Fato_Fluxo_Investidores_B3
     df_investidores = extrair_fluxo_investidores(dias_retroativos=45)
@@ -508,6 +511,7 @@ def main():
     # 5. Índices Internacionais -> Fato_Indices_Americanos (Dow Jones, Nasdaq, NYSE, Brent, OMX)
     df_indices = extrair_indices_internacionais()
     upsert_tabela_blindada(clients, df_indices, "Fato_Indices_Americanos", chaves=["Data_Coleta", "Ticker"])
+
 
     # 6. Sincronização Automática com o Robô Joca B3 no Render (Zero-Click)
     try:
