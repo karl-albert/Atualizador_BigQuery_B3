@@ -65,9 +65,9 @@ def obter_clientes_bigquery():
             else:
                 logger.warning(f"Aviso ao decodificar GCP_SA_KEY: {e_sa}")
 
-    for p in [GCP_PROJECT_ID, "balmy-renderer-458017-a3", "project-1c5de651-f9e1-439e-854"]:
-        if p and p not in candidatos:
-            candidatos.append(p)
+    # Adiciona apenas o projeto configurado na variável de ambiente (se diferente do SA)
+    if GCP_PROJECT_ID and GCP_PROJECT_ID not in candidatos:
+        candidatos.append(GCP_PROJECT_ID)
 
     for p in candidatos:
         try:
